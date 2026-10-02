@@ -5,21 +5,25 @@ Activity 2.2  planner page routes (/home-planner, /party-planner, /jewelry-plann
 Activity 2.3  /login, /register, /logout pages + POST /register
 Activity 2.4  /token, /session-info, /session-data, startup session cleanup
 
-Module 3 (POST /home-budget, /party-budget, /jewelry-budget, /history ...) is added
-below the marked line and uses the helpers from gemini_utils.py.
+Module 3 (Member 3)
+Activity 3.1  POST /home-budget, /party-budget, /jewelry-budget (+ /generate-* aliases)
+Activity 3.2  GET /recommendation-history, GET /recommendation-details/{id}
+Activity 3.3  GET /history page (CORS + static routing are set up above)
+Activity 3.4  startup cleanup (lifespan) + __main__ entry point
 """
 import asyncio
 import html
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -27,13 +31,17 @@ from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import auth
 from auth import (ACCESS_TOKEN_EXPIRE_MINUTES, COOKIE_NAME, COOKIE_SECURE, active_sessions,
                   authenticate_user, create_access_token, end_session, get_current_active_user,
                   get_current_user, get_token, register_user, start_session, utcnow)
-from models import RegisterUser, Token, UserInDB
+from gemini_utils import (get_home_recommendations_async, get_jewelry_recommendations_async,
+                          get_party_recommendations_async, save_upload_file)
+from models import (HomeBudgetInput, JewelryBudgetInput, PartyBudgetInput, RegisterUser, Token,
+                    UserInDB)
 
 load_dotenv()
 log = logging.getLogger("pocketsmart.main")
@@ -249,10 +257,144 @@ async def update_session_data(data: Dict[str, Any], request: Request,
 
 
 # ======================================================================================
-# MODULE 3 (Member 3) - add the planner POST routes and /history below this line, e.g.
-#   from gemini_utils import get_home_recommendations_async, save_upload_file
-#   @app.post("/home-budget") ... uses get_current_active_user + active_sessions
+# MODULE 3 (Member 3): planner API routes + recommendation history
 # ======================================================================================
+MAX_HISTORY_PER_USER = 100
+# username -> newest-last list of saved recommendations (in memory, like active_sessions)
+user_recommendations: Dict[str, List[Dict[str, Any]]] = {}
+
+
+def _set_last(username: str, key: str, value: Dict[str, Any]) -> None:
+    """Remember the latest planning request in the user's session data."""
+    session = active_sessions.get(username)
+    if session:
+        session.user_data[key] = {"timestamp": utcnow().isoformat(), **value}
+
+
+def _summarise_input(data: Dict[str, Any]) -> str:
+    parts = []
+    for key, val in data.items():
+        if val in (None, "", False):
+            continue
+        parts.append(f"{key.replace('_', ' ')}: {'yes' if val is True else val}")
+    return ", ".join(parts)
+
+
+def _summarise_result(kind: str, result: Dict[str, Any]) -> str:
+    spent, budget = result.get("total_spent", 0), result.get("total_budget", 0)
+    return f"{kind.title()} plan: Rs {spent:,.0f} planned of Rs {budget:,.0f} budget"
+
+
+def save_to_history(username: str, recommendation_type: str, input_data: Dict[str, Any],
+                    result: Dict[str, Any]) -> str:
+    """Store one recommendation for the user and return its id."""
+    record = {
+        "id": uuid.uuid4().hex,
+        "timestamp": utcnow().isoformat(),
+        "recommendation_type": recommendation_type,
+        "input_summary": _summarise_input(input_data),
+        "result_summary": _summarise_result(recommendation_type, result),
+        "full_result": result,
+    }
+    records = user_recommendations.setdefault(username, [])
+    records.append(record)
+    del records[:-MAX_HISTORY_PER_USER]  # keep memory bounded
+    return record["id"]
+
+
+# ---- Activity 3.1: planner routes ----------------------------------------------------------
+@app.post("/home-budget")
+async def plan_home_budget(budget_input: HomeBudgetInput, request: Request,
+                           current_user: UserInDB = Depends(get_current_active_user)):
+    """Generate home budget recommendations."""
+    _set_last(current_user.username, "last_home_budget", {
+        "budget": budget_input.total_budget,
+        "requirements": {"lights": budget_input.num_lights, "fans": budget_input.num_fans,
+                         "furniture": budget_input.num_furniture,
+                         "dining_tables": budget_input.num_dining_tables}})
+    result = await get_home_recommendations_async(budget_input)
+    result["id"] = save_to_history(current_user.username, "home", budget_input.model_dump(), result)
+    return result
+
+
+@app.post("/party-budget")
+async def plan_party_budget(budget_input: PartyBudgetInput, request: Request,
+                            current_user: UserInDB = Depends(get_current_active_user)):
+    """Generate party budget recommendations."""
+    _set_last(current_user.username, "last_party_budget", {
+        "budget": budget_input.total_budget, "party_type": budget_input.party_type,
+        "guests": budget_input.num_guests})
+    result = await get_party_recommendations_async(budget_input)
+    result["id"] = save_to_history(current_user.username, "party", budget_input.model_dump(), result)
+    return result
+
+
+@app.post("/jewelry-budget")
+async def plan_jewelry_budget(
+    request: Request,
+    total_budget: float = Form(...),
+    occasion: str = Form(...),
+    preferences: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    current_user: UserInDB = Depends(get_current_active_user),
+):
+    """Generate jewelry recommendations from text, plus an optional outfit image."""
+    try:
+        budget_input = JewelryBudgetInput(total_budget=total_budget, occasion=occasion,
+                                          preferences=preferences or None)
+    except ValidationError as exc:
+        errors = exc.errors(include_url=False, include_context=False, include_input=False)
+        raise HTTPException(status_code=422, detail=errors)
+
+    has_image = bool(image and image.filename)
+    image_path = await run_in_threadpool(save_upload_file, image) if has_image else None
+
+    _set_last(current_user.username, "last_jewelry_budget", {
+        "budget": budget_input.total_budget, "occasion": budget_input.occasion,
+        "has_image": has_image})
+    result = await get_jewelry_recommendations_async(budget_input, image_path)
+
+    input_data = budget_input.model_dump()
+    if has_image:
+        input_data["image"] = image.filename
+    result["id"] = save_to_history(current_user.username, "jewelry", input_data, result)
+    return result
+
+
+# the names used in the project document map to the same handlers
+for _path, _handler in (("/generate-home", plan_home_budget), ("/generate-party", plan_party_budget),
+                        ("/generate-jewelry", plan_jewelry_budget)):
+    app.add_api_route(_path, _handler, methods=["POST"], include_in_schema=False)
+
+
+# ---- Activity 3.2: history API -------------------------------------------------------------
+@app.get("/recommendation-history")
+async def get_recommendation_history(request: Request,
+                                     current_user: UserInDB = Depends(get_current_active_user)):
+    """The user's past recommendations, newest first (summaries only)."""
+    records = sorted(user_recommendations.get(current_user.username, []),
+                     key=lambda r: r["timestamp"], reverse=True)
+    return {"history": [{"id": r["id"], "timestamp": r["timestamp"],
+                         "type": r["recommendation_type"], "input": r["input_summary"],
+                         "summary": r["result_summary"]} for r in records]}
+
+
+@app.get("/recommendation-details/{recommendation_id}")
+async def get_recommendation_details(recommendation_id: str, request: Request,
+                                     current_user: UserInDB = Depends(get_current_active_user)):
+    """Full details of one saved recommendation."""
+    for r in user_recommendations.get(current_user.username, []):
+        if r["id"] == recommendation_id:
+            return {"id": r["id"], "timestamp": r["timestamp"], "type": r["recommendation_type"],
+                    "input": r["input_summary"], "full_result": r["full_result"]}
+    raise HTTPException(status_code=404, detail="Recommendation not found")
+
+
+# ---- Activity 3.3: history page ------------------------------------------------------------
+@app.get("/history", response_class=HTMLResponse)
+async def history_page(request: Request, current_user: UserInDB = Depends(get_current_active_user)):
+    """History page to view past recommendations."""
+    return render(request, "history.html", current_user)
 
 
 if __name__ == "__main__":
