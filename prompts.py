@@ -3,7 +3,7 @@
 The JSON schemas match the structures used in the project document so the planner
 modules (Home / Party / Jewelry) can plug these straight in.
 """
-
+from typing import Optional
 _HOME_SCHEMA = """{
   "total_budget": 0.0,
   "budget_breakdown": [
@@ -43,9 +43,14 @@ _RULES = (
 )
 
 
-def home_prompt(total_budget: float, num_lights: int = 0, num_fans: int = 0,
-                num_furniture: int = 0, num_dining_tables: int = 0,
-                rooms: list | None = None, additional: str | None = None) -> str:
+def home_prompt(total_budget: float,
+                 num_lights: int = 0,
+                   num_fans: int = 0,
+                num_furniture: int = 0,
+                  num_dining_tables: int = 0,
+                rooms: Optional[list] = None, 
+                additional: Optional[str] = None
+) ->str:
     rooms_txt = ", ".join(rooms) if rooms else "not specified"
     return (
         f"Plan home interior purchases in India with a total budget of Rs {total_budget:.2f}.\n"
@@ -57,10 +62,15 @@ def home_prompt(total_budget: float, num_lights: int = 0, num_fans: int = 0,
     )
 
 
-def party_prompt(total_budget: float, num_guests: int, party_type: str,
-                 venue_type: str | None = None, needs_catering: bool = True,
-                 needs_decoration: bool = True, needs_entertainment: bool = True,
-                 additional: str | None = None) -> str:
+def party_prompt(total_budget: float,
+                  num_guests: int,
+                    party_type: str,
+                 venue_type: Optional[str] = None
+                 , needs_catering: bool = True,
+                 needs_decoration: bool = True, 
+                 needs_entertainment: bool = True,
+                 additional: Optional[str] = None
+      ) -> str:
     yn = lambda b: "Yes" if b else "No"
     return (
         f"Plan a {party_type} party in India with a total budget of Rs {total_budget:.2f}.\n"
@@ -73,7 +83,7 @@ def party_prompt(total_budget: float, num_guests: int, party_type: str,
     )
 
 
-def jewelry_prompt(total_budget: float, occasion: str, preferences: str | None = None,
+def jewelry_prompt(total_budget: float, occasion: str, preferences: Optional[str] = None,
                    has_image: bool = False) -> str:
     img_txt = (
         "An outfit image is attached: first analyse its colours, style and formality, then suggest "
