@@ -7,13 +7,8 @@ Sits on top of Member 1's work (gemini_client.get_service() + prompts.py) and ad
   * shopping-link generation (Amazon, Flipkart, IKEA, Swiggy, Zomato, OYO, ...)
   * fallback recommendations when Gemini is unavailable or returns nothing usable
   * save_upload_file() for the outfit image (used by the Jewelry route)
-
-Public API (all return plain dicts that can be sent straight to the frontend):
-    get_home_recommendations(HomeBudgetInput)
-    get_party_recommendations(PartyBudgetInput)
-    get_jewelry_recommendations(JewelryBudgetInput, image_path=None)
-    *_async versions of the three above (use these inside `async def` routes)
 """
+
 import logging
 import re
 import sys
@@ -23,9 +18,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote_plus
 
-
-# Member 1's files (config.py, gemini_client.py, prompts.py) live one folder up from module_2/.
-# Adding that folder to the import path lets this module find them. Harmless if they are alongside.
+# Member 1's files (config.py, gemini_client.py, prompts.py) live one folder up
+# from module_2/. Adding that folder to the import path lets this module find them.
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from fastapi import HTTPException, UploadFile
@@ -36,14 +30,18 @@ from gemini_client import GeminiError, get_service
 from models import HomeBudgetInput, JewelryBudgetInput, PartyBudgetInput
 from prompts import home_prompt, jewelry_prompt, party_prompt
 
+
 log = logging.getLogger("pocketsmart.utils")
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "static" / "uploads"
+
 ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 
+
 # ------------------------------------------------------------------ shopping platforms
+
 SEARCH_URLS: Dict[str, str] = {
     "amazon": "https://www.amazon.in/s?k={q}",
     "flipkart": "https://www.flipkart.com/search?q={q}",
@@ -64,16 +62,49 @@ SEARCH_URLS: Dict[str, str] = {
     "tanishq": "https://www.tanishq.co.in/search?q={q}",
     "caratlane": "https://www.caratlane.com/search?q={q}",
     "melorra": "https://www.melorra.com/search?q={q}",
+
+    # Catering service providers
+    "justdial": "https://www.google.com/search?q=site%3Ajustdial.com+{q}",
+    "sulekha": "https://www.google.com/search?q=site%3Asulekha.com+{q}",
+    "wedmegood": "https://www.google.com/search?q=site%3Awedmegood.com+{q}",
 }
 
-# Same five buttons the Home results page shows. Edit this list to change them.
-HOME_PLATFORMS = ["amazon", "flipkart", "ikea", "myntra", "ajio"]
-JEWELRY_PLATFORMS = ["amazon", "flipkart", "bluestone", "tanishq", "caratlane", "melorra", "meesho"]
-VENUE_PLATFORMS = ["google", "booking", "makemytrip", "oyorooms", "nobroker"]
-PARTY_DEFAULT_PLATFORMS = ["amazon", "flipkart", "google"]
+
+HOME_PLATFORMS = [
+    "amazon",
+    "flipkart",
+    "ikea",
+    "myntra",
+    "ajio",
+]
+
+JEWELRY_PLATFORMS = [
+    "amazon",
+    "flipkart",
+    "bluestone",
+    "tanishq",
+    "caratlane",
+    "melorra",
+    "meesho",
+]
+
+VENUE_PLATFORMS = [
+    "google",
+    "booking",
+    "makemytrip",
+    "oyorooms",
+    "nobroker",
+]
+
+PARTY_DEFAULT_PLATFORMS = [
+    "amazon",
+    "flipkart",
+    "google",
+]
+
 PARTY_CATEGORY_PLATFORMS: Dict[str, List[str]] = {
     "venue": VENUE_PLATFORMS,
-    "catering": ["swiggy", "zomato"],
+    "catering": ["justdial", "sulekha", "wedmegood", "google"],
     "food": ["swiggy", "zomato", "bigbasket", "amazon", "flipkart"],
     "drinks": ["swiggy", "zomato", "bigbasket", "amazon", "flipkart"],
     "decoration": ["amazon", "flipkart", "meesho", "myntra"],
@@ -90,362 +121,1181 @@ PARTY_CATEGORY_PLATFORMS: Dict[str, List[str]] = {
 
 def build_links(platforms: List[str], search_terms: str) -> Dict[str, str]:
     q = quote_plus(search_terms.strip())
-    return {p: SEARCH_URLS[p].replace("{q}", q) for p in platforms if p in SEARCH_URLS}
+    return {
+        p: SEARCH_URLS[p].replace("{q}", q)
+        for p in platforms
+        if p in SEARCH_URLS
+    }
 
 
 def _platforms_for_category(category: str) -> List[str]:
-    c = re.sub(r"[^a-z]+", "_", category.lower()).strip("_")
+    c = re.sub(r"[^a-z]+", "", category.lower()).strip("")
+
     if c in PARTY_CATEGORY_PLATFORMS:
         return PARTY_CATEGORY_PLATFORMS[c]
+
     if len(c) >= 3:
         for key, platforms in PARTY_CATEGORY_PLATFORMS.items():
             if key in c or c in key:
                 return platforms
+
     return PARTY_DEFAULT_PLATFORMS
 
 
+# ------------------------------------------------------------------ insufficient-budget rules
+
+MIN_PRICES = {
+    "light": 100,
+    "fan": 1000,
+    "furniture": 1000,
+    "dining_table": 3000,
+    "room": 1000,
+
+    "plate": 100,
+    "decoration": 500,
+    "entertainment": 500,
+    "venue": 2000,
+
+    "jewelry": 300,
+}
+
+TIGHT_FACTOR = 1.5
+
+
+class InsufficientBudgetError(Exception):
+    """Budget is below the realistic minimum for the request."""
+
+    def __init__(
+        self,
+        budget: float,
+        minimum: float,
+        needs: List[str],
+        hint: str,
+    ):
+        self.budget = budget
+        self.minimum = minimum
+        self.needs = needs
+        self.hint = hint
+
+        self.shortfall = round(minimum - budget, 2)
+
+        self.message = (
+            f"Rs {budget:,.0f} is not enough for this request. "
+            f"The minimum realistic budget for {', '.join(needs)} "
+            f"is about Rs {minimum:,.0f} "
+            f"(short by Rs {self.shortfall:,.0f}). {hint}"
+        )
+
+        super().__init__(self.message)
+
+
+def _check_sufficient(
+    budget: float,
+    needs: List[tuple],
+    hint: str,
+) -> bool:
+    """Raises if budget < minimum; returns True when budget is tight."""
+
+    minimum = float(sum(cost for _, cost in needs))
+
+    if budget < minimum:
+        raise InsufficientBudgetError(
+            budget,
+            minimum,
+            [label for label, _ in needs],
+            hint,
+        )
+
+    return budget < minimum * TIGHT_FACTOR
+
+
+def _tight_notice(
+    result: Dict[str, Any],
+    tight: bool,
+) -> Dict[str, Any]:
+
+    if tight:
+        result["budget_status"] = "tight"
+
+        tip = (
+            "Your budget is tight for this request, so mostly basic "
+            "options are suggested. Prioritise essentials."
+        )
+
+        key = (
+            "styling_tips"
+            if "jewelry_recommendations" in result
+            else "additional_suggestions"
+        )
+
+        result[key] = [tip] + result.get(key, [])
+
+    return result
+
+
 # ------------------------------------------------------------------ cleaning / math
+
 def _num(value: Any, default: float = 0.0) -> float:
-    """Tolerant number parser: 1200, '1200', 'Rs 1,200.50' all work."""
+    """Tolerant number parser."""
+
     if isinstance(value, bool):
         return default
+
     if isinstance(value, (int, float)):
         return float(value)
+
     if isinstance(value, str):
         m = re.search(r"\d[\d,]*\.?\d*", value)
+
         if m:
             try:
                 return float(m.group().replace(",", ""))
             except ValueError:
                 pass
+
     return default
 
 
 def _clean_items(items: Any) -> List[Dict[str, Any]]:
     cleaned = []
+
     for it in items or []:
         if not isinstance(it, dict):
             continue
-        name = str(it.get("name") or it.get("item_type") or "").strip()
+
+        name = str(
+            it.get("name")
+            or it.get("item_type")
+            or ""
+        ).strip()
+
         if not name:
             continue
+
         cleaned.append({
             **it,
             "name": name,
-            "description": str(it.get("description") or "").strip(),
-            "estimated_price": round(max(_num(it.get("estimated_price")), 0.0), 2),
-            "quantity": max(int(_num(it.get("quantity"), 1)), 1),
-            "search_terms": str(it.get("search_terms") or name).strip(),
+            "description": str(
+                it.get("description") or ""
+            ).strip(),
+
+            "estimated_price": round(
+                max(
+                    _num(it.get("estimated_price")),
+                    0.0,
+                ),
+                2,
+            ),
+
+            "quantity": max(
+                int(_num(it.get("quantity"), 1)),
+                1,
+            ),
+
+            "search_terms": str(
+                it.get("search_terms") or name
+            ).strip(),
         })
+
     return cleaned
 
 
 def _str_list(value: Any) -> List[str]:
+
     if isinstance(value, str):
         value = [value]
-    return [str(v).strip() for v in (value or []) if str(v).strip()]
+
+    return [
+        str(v).strip()
+        for v in (value or [])
+        if str(v).strip()
+    ]
 
 
-def _finalize_plan(raw: Dict[str, Any], total_budget: float, table_key: str) -> Dict[str, Any]:
-    """Re-compute every number from the items so the UI never shows wrong totals."""
-    breakdown, table = [], []
-    spent = allocated = 0.0
+def _finalize_plan(
+    raw: Dict[str, Any],
+    total_budget: float,
+    table_key: str,
+) -> Dict[str, Any]:
+
+    """Re-compute every number from the items."""
+
+    breakdown = []
+    table = []
+
+    spent = 0.0
+    allocated = 0.0
+
     for cat in raw.get("budget_breakdown") or []:
+
         if not isinstance(cat, dict):
             continue
+
         items = _clean_items(cat.get("items"))
+
         if not items:
             continue
-        cost = round(sum(i["estimated_price"] * i["quantity"] for i in items), 2)
-        alloc = round(_num(cat.get("allocation")) or cost, 2)
-        name = str(cat.get("category") or "misc").strip()
-        breakdown.append({"category": name, "allocation": alloc, "items": items})
+
+        cost = round(
+            sum(
+                i["estimated_price"] * i["quantity"]
+                for i in items
+            ),
+            2,
+        )
+
+        alloc = round(
+            _num(cat.get("allocation")) or cost,
+            2,
+        )
+
+        name = str(
+            cat.get("category") or "misc"
+        ).strip()
+
+        breakdown.append({
+            "category": name,
+            "allocation": alloc,
+            "items": items,
+        })
+
         table.append({
             "category": name,
             "items_count": len(items),
             "total_cost": cost,
-            "percentage_of_budget": round(cost / total_budget * 100, 2),
+            "percentage_of_budget": round(
+                cost / total_budget * 100,
+                2,
+            ),
         })
+
         spent += cost
         allocated += alloc
+
     spent = round(spent, 2)
+
     return {
         "total_budget": round(total_budget, 2),
         "budget_breakdown": breakdown,
         table_key: table,
         "total_spent": spent,
         "total_allocated": round(allocated, 2),
-        "remaining_budget": round(total_budget - spent, 2),
-        "additional_suggestions": _str_list(raw.get("additional_suggestions")),
+        "remaining_budget": round(
+            total_budget - spent,
+            2,
+        ),
+        "additional_suggestions": _str_list(
+            raw.get("additional_suggestions")
+        ),
     }
 
 
 # ------------------------------------------------------------------ Gemini orchestration
-def _generate_with_checks(prompt: str, total_budget: float,
-                          finalize: Callable[[Dict[str, Any]], Dict[str, Any]],
-                          has_items: Callable[[Dict[str, Any]], bool],
-                          image: Optional[str] = None) -> Dict[str, Any]:
-    """Call Gemini, finalize, retry once if over budget. Raises GeminiError if unusable."""
+
+def _generate_with_checks(
+    prompt: str,
+    total_budget: float,
+    finalize: Callable[[Dict[str, Any]], Dict[str, Any]],
+    has_items: Callable[[Dict[str, Any]], bool],
+    image: Optional[str] = None,
+) -> Dict[str, Any]:
+
     svc = get_service()
-    result = finalize(svc.generate_json(prompt, image=image))
+
+    result = finalize(
+        svc.generate_json(
+            prompt,
+            image=image,
+        )
+    )
+
     if not has_items(result):
-        raise GeminiError("Gemini returned no usable items.")
+        raise GeminiError(
+            "Gemini returned no usable items."
+        )
 
     if result["total_spent"] > total_budget * 1.01:
-        log.warning("Plan costs %.0f but budget is %.0f - asking Gemini for a cheaper plan.",
-                    result["total_spent"], total_budget)
-        retry_prompt = (
-            prompt + f"\n\nIMPORTANT: your previous plan cost Rs {result['total_spent']:.0f}, which is MORE than the "
-            f"budget of Rs {total_budget:.0f}. Return a cheaper plan with a total of at most "
-            f"Rs {total_budget * 0.95:.0f}. Remember total = sum of estimated_price x quantity."
+
+        log.warning(
+            "Plan costs %.0f but budget is %.0f - asking Gemini for a cheaper plan.",
+            result["total_spent"],
+            total_budget,
         )
+
+        retry_prompt = (
+            prompt
+            + f"\n\nIMPORTANT: your previous plan cost "
+            f"Rs {result['total_spent']:.0f}, which is MORE "
+            f"than the budget of Rs {total_budget:.0f}. "
+            f"Return a cheaper plan with a total of at most "
+            f"Rs {total_budget * 0.95:.0f}. "
+            f"Remember total = sum of estimated_price x quantity."
+        )
+
         try:
-            second = finalize(svc.generate_json(retry_prompt, image=image))
-            if has_items(second) and second["total_spent"] < result["total_spent"]:
+            second = finalize(
+                svc.generate_json(
+                    retry_prompt,
+                    image=image,
+                )
+            )
+
+            if (
+                has_items(second)
+                and second["total_spent"]
+                < result["total_spent"]
+            ):
                 result = second
+
         except GeminiError as exc:
-            log.warning("Budget-correction retry failed: %s", exc)
+            log.warning(
+                "Budget-correction retry failed: %s",
+                exc,
+            )
+
         if result["total_spent"] > total_budget * 1.01:
-            warn = (f"Estimated total (Rs {result['total_spent']:.0f}) is above your budget. "
-                    "Consider reducing quantities or choosing cheaper options.")
+
+            over = round(
+                result["total_spent"] - total_budget,
+                2,
+            )
+
+            warn = (
+                f"Estimated total (Rs {result['total_spent']:.0f}) "
+                f"is Rs {over:,.0f} above your budget. "
+                "Consider reducing quantities or choosing cheaper options."
+            )
+
             result["budget_warning"] = warn
-            result["additional_suggestions"] = [warn] + result.get("additional_suggestions", [])
+            result["budget_status"] = "over"
+            result["shortfall"] = over
+
+            result["additional_suggestions"] = [
+                warn
+            ] + result.get(
+                "additional_suggestions",
+                [],
+            )
 
     result["source"] = "gemini"
     result["model"] = svc.last_model_used
+
     return result
 
 
-def _run(prompt: str, total_budget: float, finalize, has_items, fallback, image: Optional[str] = None):
+def _run(
+    prompt: str,
+    total_budget: float,
+    finalize,
+    has_items,
+    fallback,
+    image: Optional[str] = None,
+):
+
     try:
-        return _generate_with_checks(prompt, total_budget, finalize, has_items, image)
-    except ValueError as exc:  # no API key configured -> configuration problem, not a fallback case
-        raise HTTPException(status_code=500, detail=str(exc))
+        return _generate_with_checks(
+            prompt,
+            total_budget,
+            finalize,
+            has_items,
+            image,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
     except GeminiError as exc:
+
         if "API key" in str(exc):
-            raise HTTPException(status_code=500, detail=str(exc))
-        log.error("Gemini unavailable, using fallback plan: %s", exc)
+            raise HTTPException(
+                status_code=500,
+                detail=str(exc),
+            )
+
+        log.error(
+            "Gemini unavailable, using fallback plan: %s",
+            exc,
+        )
+
         result = fallback()
+
         result["source"] = "fallback"
-        result["notice"] = "The AI service is unavailable right now, so standard budget estimates are shown."
+        result["notice"] = (
+            "The AI service is unavailable right now, "
+            "so standard budget estimates are shown."
+        )
+
         return result
 
 
 # ================================================================== HOME PLANNER
+
 def _home_has_items(r: Dict[str, Any]) -> bool:
     return bool(r.get("budget_breakdown"))
 
 
-def _finalize_home(raw: Dict[str, Any], total_budget: float) -> Dict[str, Any]:
-    result = _finalize_plan(raw, total_budget, "calculation_table")
+def _finalize_home(
+    raw: Dict[str, Any],
+    total_budget: float,
+) -> Dict[str, Any]:
+
+    result = _finalize_plan(
+        raw,
+        total_budget,
+        "calculation_table",
+    )
+
     for cat in result["budget_breakdown"]:
         for item in cat["items"]:
-            item["shopping_links"] = build_links(HOME_PLATFORMS, item["search_terms"])
+            item["shopping_links"] = build_links(
+                HOME_PLATFORMS,
+                item["search_terms"],
+            )
+
     return result
 
 
-def _fallback_home(b: HomeBudgetInput) -> Dict[str, Any]:
-    spec = [  # category, qty, budget weight, item name, search terms
-        ("lighting", b.num_lights, 0.20, "LED light fixture (warm white)", "led ceiling light warm white"),
-        ("ceiling_fans", b.num_fans, 0.25, "5-star BEE ceiling fan", "ceiling fan 1200mm 5 star"),
-        ("furniture", b.num_furniture, 0.35, "Engineered-wood furniture piece", "engineered wood furniture"),
-        ("dining_tables", b.num_dining_tables, 0.20, "4-seater dining table", "4 seater dining table"),
+def _fallback_home(
+    b: HomeBudgetInput,
+) -> Dict[str, Any]:
+
+    spec = [
+        (
+            "lighting",
+            b.num_lights,
+            0.20,
+            "LED light fixture (warm white)",
+            "led ceiling light warm white",
+        ),
+        (
+            "ceiling_fans",
+            b.num_fans,
+            0.25,
+            "5-star BEE ceiling fan",
+            "ceiling fan 1200mm 5 star",
+        ),
+        (
+            "furniture",
+            b.num_furniture,
+            0.35,
+            "Engineered-wood furniture piece",
+            "engineered wood furniture",
+        ),
+        (
+            "dining_tables",
+            b.num_dining_tables,
+            0.20,
+            "4-seater dining table",
+            "4 seater dining table",
+        ),
     ]
-    active = [s for s in spec if s[1] > 0] or [
-        ("lighting", 1, 0.4, spec[0][3], spec[0][4]), ("furniture", 1, 0.6, spec[2][3], spec[2][4])]
-    wsum = sum(s[2] for s in active)
+
+    active = [
+        s for s in spec
+        if s[1] > 0
+    ] or [
+        (
+            "lighting",
+            1,
+            0.4,
+            spec[0][3],
+            spec[0][4],
+        ),
+        (
+            "furniture",
+            1,
+            0.6,
+            spec[2][3],
+            spec[2][4],
+        ),
+    ]
+
+    wsum = sum(
+        s[2]
+        for s in active
+    )
+
     breakdown = []
+
     for cat, qty, w, name, terms in active:
-        alloc = b.total_budget * 0.9 * w / wsum
-        breakdown.append({"category": cat, "allocation": alloc, "items": [{
-            "name": name, "description": "Standard budget-friendly option (estimate).",
-            "estimated_price": alloc / qty, "quantity": qty, "search_terms": terms}]})
-    raw = {"budget_breakdown": breakdown, "additional_suggestions": [
-        "Compare prices across Amazon, Flipkart and IKEA before buying.",
-        "Look out for festival-season sales and bank offers.",
-        "Prioritise essentials first and postpone non-essential purchases."]}
-    return _finalize_home(raw, b.total_budget)
+
+        alloc = (
+            b.total_budget
+            * 0.9
+            * w
+            / wsum
+        )
+
+        breakdown.append({
+            "category": cat,
+            "allocation": alloc,
+            "items": [{
+                "name": name,
+                "description": (
+                    "Standard budget-friendly option (estimate)."
+                ),
+                "estimated_price": alloc / qty,
+                "quantity": qty,
+                "search_terms": terms,
+            }],
+        })
+
+    raw = {
+        "budget_breakdown": breakdown,
+        "additional_suggestions": [
+            "Compare prices across Amazon, Flipkart and IKEA before buying.",
+            "Look out for festival-season sales and bank offers.",
+            "Prioritise essentials first and postpone non-essential purchases.",
+        ],
+    }
+
+    return _finalize_home(
+        raw,
+        b.total_budget,
+    )
 
 
-def get_home_recommendations(budget_input: HomeBudgetInput) -> Dict[str, Any]:
-    """Home interior plan within budget (INR) with shopping links per item."""
+def get_home_recommendations(
+    budget_input: HomeBudgetInput,
+) -> Dict[str, Any]:
+
+    b = budget_input
+
+    needs = [
+        (
+            f"{n} {label}",
+            n * MIN_PRICES[key],
+        )
+        for n, label, key in (
+            (
+                b.num_lights,
+                "light(s)",
+                "light",
+            ),
+            (
+                b.num_fans,
+                "ceiling fan(s)",
+                "fan",
+            ),
+            (
+                b.num_furniture,
+                "furniture piece(s)",
+                "furniture",
+            ),
+            (
+                b.num_dining_tables,
+                "dining table(s)",
+                "dining_table",
+            ),
+        )
+        if n > 0
+    ]
+
+    if not needs:
+        needs = [
+            (
+                f"{len(b.rooms)} room(s)",
+                len(b.rooms) * MIN_PRICES["room"],
+            )
+        ]
+
+    tight = _check_sufficient(
+        b.total_budget,
+        needs,
+        "Increase your budget or reduce the number of items.",
+    )
+
     prompt = home_prompt(
-        budget_input.total_budget, budget_input.num_lights, budget_input.num_fans,
-        budget_input.num_furniture, budget_input.num_dining_tables,
-        rooms=budget_input.rooms, additional=budget_input.additional_requirements)
+        budget_input.total_budget,
+        budget_input.num_lights,
+        budget_input.num_fans,
+        budget_input.num_furniture,
+        budget_input.num_dining_tables,
+        rooms=budget_input.rooms,
+        additional=budget_input.additional_requirements,
+    )
+
     tb = budget_input.total_budget
-    return _run(prompt, tb, lambda raw: _finalize_home(raw, tb), _home_has_items,
-                lambda: _fallback_home(budget_input))
+
+    return _tight_notice(
+        _run(
+            prompt,
+            tb,
+            lambda raw: _finalize_home(raw, tb),
+            _home_has_items,
+            lambda: _fallback_home(budget_input),
+        ),
+        tight,
+    )
 
 
 # ================================================================== PARTY PLANNER
-def _finalize_party(raw: Dict[str, Any], total_budget: float) -> Dict[str, Any]:
-    result = _finalize_plan(raw, total_budget, "calculation_table_inr")
+
+def _finalize_party(
+    raw: Dict[str, Any],
+    total_budget: float,
+) -> Dict[str, Any]:
+
+    result = _finalize_plan(
+        raw,
+        total_budget,
+        "calculation_table_inr",
+    )
+
     for cat in result["budget_breakdown"]:
-        platforms = _platforms_for_category(cat["category"])
+
+        platforms = _platforms_for_category(
+            cat["category"]
+        )
+
         for item in cat["items"]:
-            item["shopping_links"] = build_links(platforms, item["search_terms"])
+            item["shopping_links"] = build_links(
+                platforms,
+                item["search_terms"],
+            )
+
     venues = []
+
     for v in raw.get("venue_suggestions") or []:
-        if not isinstance(v, dict) or not str(v.get("name") or "").strip():
+
+        if (
+            not isinstance(v, dict)
+            or not str(v.get("name") or "").strip()
+        ):
             continue
+
         name = str(v["name"]).strip()
-        terms = str(v.get("search_terms") or name).strip()
+
+        terms = str(
+            v.get("search_terms") or name
+        ).strip()
+
         venues.append({
             "name": name,
-            "type": str(v.get("type") or "").strip(),
-            "capacity": int(_num(v.get("capacity"))),
-            "estimated_cost": round(_num(v.get("estimated_cost")), 2),
-            "location": str(v.get("location") or "").strip(),
+            "type": str(
+                v.get("type") or ""
+            ).strip(),
+
+            "capacity": int(
+                _num(v.get("capacity"))
+            ),
+
+            "estimated_cost": round(
+                _num(v.get("estimated_cost")),
+                2,
+            ),
+
+            "location": str(
+                v.get("location") or ""
+            ).strip(),
+
             "search_terms": terms,
-            "search_links": build_links(VENUE_PLATFORMS, terms),
+
+            "search_links": build_links(
+                VENUE_PLATFORMS,
+                terms,
+            ),
         })
+
     result["venue_suggestions"] = venues
+
     return result
 
 
-def _fallback_party(b: PartyBudgetInput) -> Dict[str, Any]:
-    at_home = "home" in (b.venue_type or "").lower()
-    shares = {"venue": 0.0 if at_home else 0.15, "catering": 0.45 if b.needs_catering else 0.0,
-              "decoration": 0.20 if b.needs_decoration else 0.0,
-              "entertainment": 0.15 if b.needs_entertainment else 0.0, "contingency": 0.10}
-    wsum = sum(shares.values())
-    kind = b.party_type.lower()
-    templates = {
-        "venue": ("Banquet / community hall hire", f"{kind} party hall", 1),
-        "catering": (f"Catering for {b.num_guests} guests", f"{kind} party catering", b.num_guests),
-        "decoration": ("Theme decoration kit", f"{kind} party decoration", 1),
-        "entertainment": ("DJ / music and games", "party games and speaker", 1),
-        "contingency": ("Contingency buffer", "party supplies", 1),
+def _fallback_party(
+    b: PartyBudgetInput,
+) -> Dict[str, Any]:
+
+    at_home = (
+        "home"
+        in (b.venue_type or "").lower()
+    )
+
+    shares = {
+        "venue": 0.0 if at_home else 0.15,
+        "catering": 0.45 if b.needs_catering else 0.0,
+        "decoration": 0.20 if b.needs_decoration else 0.0,
+        "entertainment": 0.15 if b.needs_entertainment else 0.0,
+        "contingency": 0.10,
     }
+
+    wsum = sum(shares.values())
+
+    kind = b.party_type.lower()
+
+    templates = {
+        "venue": (
+            "Banquet / community hall hire",
+            f"{kind} party hall",
+            1,
+        ),
+
+        "catering": (
+            f"Catering for {b.num_guests} guests",
+            f"{kind} party catering",
+            b.num_guests,
+        ),
+
+        "decoration": (
+            "Theme decoration kit",
+            f"{kind} party decoration",
+            1,
+        ),
+
+        "entertainment": (
+            "DJ / music and games",
+            "party games and speaker",
+            1,
+        ),
+
+        "contingency": (
+            "Contingency buffer",
+            "party supplies",
+            1,
+        ),
+    }
+
     breakdown = []
+
     for cat, share in shares.items():
+
         if share <= 0:
             continue
-        alloc = b.total_budget * 0.98 * share / wsum
+
+        alloc = (
+            b.total_budget
+            * 0.98
+            * share
+            / wsum
+        )
+
         name, terms, qty = templates[cat]
-        breakdown.append({"category": cat, "allocation": alloc, "items": [{
-            "name": name, "description": "Standard estimate for your budget.",
-            "estimated_price": alloc / qty, "quantity": qty, "search_terms": terms}]})
-    venue = (b.venue_type or "Community hall / banquet hall").strip()
-    raw = {"budget_breakdown": breakdown,
-           "venue_suggestions": [{"name": venue, "type": venue, "capacity": b.num_guests,
-                                  "estimated_cost": shares["venue"] * b.total_budget,
-                                  "search_terms": f"{venue} for {b.num_guests} guests"}],
-           "additional_suggestions": [
-               "Order catering at least 3 days ahead for better rates.",
-               "Homemade decorations can cut costs significantly.",
-               "Keep the contingency buffer for last-minute expenses."]}
-    return _finalize_party(raw, b.total_budget)
+
+        breakdown.append({
+            "category": cat,
+            "allocation": alloc,
+            "items": [{
+                "name": name,
+                "description": (
+                    "Standard estimate for your budget."
+                ),
+                "estimated_price": alloc / qty,
+                "quantity": qty,
+                "search_terms": terms,
+            }],
+        })
+
+    venue = (
+        b.venue_type
+        or "Community hall / banquet hall"
+    ).strip()
+
+    raw = {
+        "budget_breakdown": breakdown,
+
+        "venue_suggestions": [{
+            "name": venue,
+            "type": venue,
+            "capacity": b.num_guests,
+            "estimated_cost": (
+                shares["venue"]
+                * b.total_budget
+            ),
+            "search_terms": (
+                f"{venue} for {b.num_guests} guests"
+            ),
+        }],
+
+        "additional_suggestions": [
+            "Order catering at least 3 days ahead for better rates.",
+            "Homemade decorations can cut costs significantly.",
+            "Keep the contingency buffer for last-minute expenses.",
+        ],
+    }
+
+    return _finalize_party(
+        raw,
+        b.total_budget,
+    )
 
 
-def get_party_recommendations(budget_input: PartyBudgetInput) -> Dict[str, Any]:
-    """Party plan split across catering / decoration / entertainment (+ venue, contingency)."""
+def get_party_recommendations(
+    budget_input: PartyBudgetInput,
+) -> Dict[str, Any]:
+
+    b = budget_input
+
+    needs = []
+
+    if b.needs_catering:
+        needs.append((
+            f"catering for {b.num_guests} guests",
+            b.num_guests * MIN_PRICES["plate"],
+        ))
+
+    if b.needs_decoration:
+        needs.append((
+            "decoration",
+            MIN_PRICES["decoration"],
+        ))
+
+    if b.needs_entertainment:
+        needs.append((
+            "entertainment",
+            MIN_PRICES["entertainment"],
+        ))
+
+    venue = (
+        b.venue_type or ""
+    ).lower()
+
+    if venue and not any(
+        w in venue
+        for w in (
+            "home",
+            "house",
+            "residence",
+            "apartment",
+            "terrace",
+        )
+    ):
+        needs.append((
+            f"a {b.venue_type} venue",
+            MIN_PRICES["venue"],
+        ))
+
+    if not needs:
+        needs = [
+            (
+                "a basic party",
+                MIN_PRICES["decoration"],
+            )
+        ]
+
+    tight = _check_sufficient(
+        b.total_budget,
+        needs,
+        "Increase your budget, reduce the guest list, or drop some party needs.",
+    )
+
     prompt = party_prompt(
-        budget_input.total_budget, budget_input.num_guests, budget_input.party_type,
-        budget_input.venue_type, budget_input.needs_catering, budget_input.needs_decoration,
-        budget_input.needs_entertainment, budget_input.additional_requirements)
+        budget_input.total_budget,
+        budget_input.num_guests,
+        budget_input.party_type,
+        budget_input.venue_type,
+        budget_input.needs_catering,
+        budget_input.needs_decoration,
+        budget_input.needs_entertainment,
+        budget_input.additional_requirements,
+    )
+
     tb = budget_input.total_budget
-    return _run(prompt, tb, lambda raw: _finalize_party(raw, tb), _home_has_items,
-                lambda: _fallback_party(budget_input))
+
+    return _tight_notice(
+        _run(
+            prompt,
+            tb,
+            lambda raw: _finalize_party(raw, tb),
+            _home_has_items,
+            lambda: _fallback_party(budget_input),
+        ),
+        tight,
+    )
 
 
 # ================================================================== JEWELRY PLANNER
-def _finalize_jewelry(raw: Dict[str, Any], total_budget: float, has_image: bool) -> Dict[str, Any]:
-    items = _clean_items(raw.get("jewelry_recommendations"))
+
+def _finalize_jewelry(
+    raw: Dict[str, Any],
+    total_budget: float,
+    has_image: bool,
+) -> Dict[str, Any]:
+
+    items = _clean_items(
+        raw.get("jewelry_recommendations")
+    )
+
     spent = 0.0
+
     for it in items:
-        it["item_type"] = str(it.get("item_type") or it["name"]).strip()
-        it["style"] = str(it.get("style") or "").strip()
-        it["shopping_links"] = build_links(JEWELRY_PLATFORMS, it["search_terms"])
-        spent += it["estimated_price"]  # one piece of each item
+
+        it["item_type"] = str(
+            it.get("item_type") or it["name"]
+        ).strip()
+
+        it["style"] = str(
+            it.get("style") or ""
+        ).strip()
+
+        it["shopping_links"] = build_links(
+            JEWELRY_PLATFORMS,
+            it["search_terms"],
+        )
+
+        spent += it["estimated_price"]
+
     spent = round(spent, 2)
+
     result: Dict[str, Any] = {
-        "total_budget": round(total_budget, 2),
+        "total_budget": round(
+            total_budget,
+            2,
+        ),
+
         "jewelry_recommendations": items,
+
         "total_spent": spent,
-        "remaining_budget": round(total_budget - spent, 2),
-        "styling_tips": _str_list(raw.get("styling_tips")),
+
+        "remaining_budget": round(
+            total_budget - spent,
+            2,
+        ),
+
+        "styling_tips": _str_list(
+            raw.get("styling_tips")
+        ),
     }
+
     if has_image:
-        oa = raw.get("outfit_analysis") if isinstance(raw.get("outfit_analysis"), dict) else {}
+
+        oa = (
+            raw.get("outfit_analysis")
+            if isinstance(
+                raw.get("outfit_analysis"),
+                dict,
+            )
+            else {}
+        )
+
         result["outfit_analysis"] = {
-            "colors": _str_list(oa.get("colors")),
-            "style": str(oa.get("style") or "").strip(),
-            "formality": str(oa.get("formality") or "").strip(),
+            "colors": _str_list(
+                oa.get("colors")
+            ),
+
+            "style": str(
+                oa.get("style") or ""
+            ).strip(),
+
+            "formality": str(
+                oa.get("formality") or ""
+            ).strip(),
         }
+
     return result
 
 
-def _fallback_jewelry(b: JewelryBudgetInput, has_image: bool) -> Dict[str, Any]:
+def _fallback_jewelry(
+    b: JewelryBudgetInput,
+    has_image: bool,
+) -> Dict[str, Any]:
+
     style = b.preferences or "elegant"
-    parts = [("necklace", 0.35), ("earrings", 0.25), ("bracelet", 0.20), ("ring", 0.15)]
-    items = [{"item_type": t, "name": t.title(), "style": style,
-              "description": f"A {style} {t} suitable for a {b.occasion}.",
-              "estimated_price": b.total_budget * w,
-              "search_terms": f"{style} {t} for women {b.occasion}"} for t, w in parts]
-    raw = {"jewelry_recommendations": items, "styling_tips": [
-        "Pick one statement piece and keep the rest minimal.",
-        "Match metal tones (gold / silver / rose gold) across all pieces.",
-        "Let the neckline of the outfit decide between necklace and earrings."]}
-    return _finalize_jewelry(raw, b.total_budget, has_image)
+
+    parts = [
+        ("necklace", 0.35),
+        ("earrings", 0.25),
+        ("bracelet", 0.20),
+        ("ring", 0.15),
+    ]
+
+    items = [
+        {
+            "item_type": t,
+            "name": t.title(),
+            "style": style,
+            "description": (
+                f"A {style} {t} suitable "
+                f"for a {b.occasion}."
+            ),
+            "estimated_price": b.total_budget * w,
+            "search_terms": (
+                f"{style} {t} for women {b.occasion}"
+            ),
+        }
+        for t, w in parts
+    ]
+
+    raw = {
+        "jewelry_recommendations": items,
+
+        "styling_tips": [
+            "Pick one statement piece and keep the rest minimal.",
+            "Match metal tones (gold / silver / rose gold) across all pieces.",
+            "Let the neckline of the outfit decide between necklace and earrings.",
+        ],
+    }
+
+    return _finalize_jewelry(
+        raw,
+        b.total_budget,
+        has_image,
+    )
 
 
-def get_jewelry_recommendations(budget_input: JewelryBudgetInput,
-                                image_path: Optional[str] = None) -> Dict[str, Any]:
-    """Jewelry suggestions for an occasion; pass image_path to match an outfit photo."""
+def get_jewelry_recommendations(
+    budget_input: JewelryBudgetInput,
+    image_path: Optional[str] = None,
+) -> Dict[str, Any]:
+
     if image_path:
+
         try:
             with Image.open(image_path) as im:
                 im.verify()
+
         except Exception:
-            raise HTTPException(status_code=400, detail="The uploaded outfit image could not be read.")
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded outfit image could not be read.",
+            )
+
     has_image = bool(image_path)
-    prompt = jewelry_prompt(budget_input.total_budget, budget_input.occasion,
-                            budget_input.preferences, has_image=has_image)
+
+    tight = _check_sufficient(
+        budget_input.total_budget,
+        [
+            (
+                "one piece of jewelry",
+                MIN_PRICES["jewelry"],
+            )
+        ],
+        "Increase your budget to see recommendations.",
+    )
+
+    prompt = jewelry_prompt(
+        budget_input.total_budget,
+        budget_input.occasion,
+        budget_input.preferences,
+        has_image=has_image,
+    )
+
     tb = budget_input.total_budget
-    return _run(prompt, tb, lambda raw: _finalize_jewelry(raw, tb, has_image),
-                lambda r: bool(r.get("jewelry_recommendations")),
-                lambda: _fallback_jewelry(budget_input, has_image),
-                image=image_path)
+
+    return _tight_notice(
+        _run(
+            prompt,
+            tb,
+            lambda raw: _finalize_jewelry(
+                raw,
+                tb,
+                has_image,
+            ),
+            lambda r: bool(
+                r.get("jewelry_recommendations")
+            ),
+            lambda: _fallback_jewelry(
+                budget_input,
+                has_image,
+            ),
+            image=image_path,
+        ),
+        tight,
+    )
 
 
 # ------------------------------------------------------------------ async wrappers
-# The Gemini call takes seconds. Inside `async def` routes use these so the server stays responsive.
-async def get_home_recommendations_async(b: HomeBudgetInput):
-    return await run_in_threadpool(get_home_recommendations, b)
+
+async def get_home_recommendations_async(
+    b: HomeBudgetInput,
+):
+    return await run_in_threadpool(
+        get_home_recommendations,
+        b,
+    )
 
 
-async def get_party_recommendations_async(b: PartyBudgetInput):
-    return await run_in_threadpool(get_party_recommendations, b)
+async def get_party_recommendations_async(
+    b: PartyBudgetInput,
+):
+    return await run_in_threadpool(
+        get_party_recommendations,
+        b,
+    )
 
 
-async def get_jewelry_recommendations_async(b: JewelryBudgetInput, image_path: Optional[str] = None):
-    return await run_in_threadpool(get_jewelry_recommendations, b, image_path)
+async def get_jewelry_recommendations_async(
+    b: JewelryBudgetInput,
+    image_path: Optional[str] = None,
+):
+    return await run_in_threadpool(
+        get_jewelry_recommendations,
+        b,
+        image_path,
+    )
 
 
 # ------------------------------------------------------------------ image upload helper
-def save_upload_file(upload: UploadFile) -> str:
-    """Validate + store an uploaded outfit image in static/uploads/, return its path."""
-    ext = Path(upload.filename or "").suffix.lower()
+
+def save_upload_file(
+    upload: UploadFile,
+) -> str:
+
+    """Validate + store an uploaded outfit image."""
+
+    ext = Path(
+        upload.filename or ""
+    ).suffix.lower()
+
     if ext not in ALLOWED_IMAGE_EXT:
-        raise HTTPException(status_code=400, detail="Only JPG, PNG or WEBP images are allowed.")
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    dest = UPLOAD_DIR / f"{datetime.now():%Y%m%d%H%M%S}_{uuid.uuid4().hex[:8]}{ext}"
+        raise HTTPException(
+            status_code=400,
+            detail="Only JPG, PNG or WEBP images are allowed.",
+        )
+
+    UPLOAD_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    dest = (
+        UPLOAD_DIR
+        / f"{datetime.now():%Y%m%d%H%M%S}_"
+          f"{uuid.uuid4().hex[:8]}{ext}"
+    )
+
     size = 0
+
     try:
+
         with dest.open("wb") as out:
-            while chunk := upload.file.read(1024 * 1024):
+
+            while chunk := upload.file.read(
+                1024 * 1024
+            ):
+
                 size += len(chunk)
+
                 if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(status_code=413, detail="Image is too large (max 5 MB).")
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Image is too large (max 5 MB).",
+                    )
+
                 out.write(chunk)
+
         with Image.open(dest) as im:
             im.verify()
+
     except HTTPException:
-        dest.unlink(missing_ok=True)
+
+        dest.unlink(
+            missing_ok=True
+        )
+
         raise
+
     except Exception:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.")
+
+        dest.unlink(
+            missing_ok=True
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded file is not a valid image.",
+        )
+
     return str(dest)

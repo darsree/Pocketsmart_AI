@@ -1,6 +1,3 @@
-"""Module 2 tests. Run:  python test_module2.py          (offline, no API key needed)
-                         python test_module2.py --live   (also calls real Gemini)
-"""
 import os
 import sys
 import tempfile
@@ -26,7 +23,7 @@ class FakeService:
     """Stands in for Gemini so tests are free, fast and deterministic."""
     last_model_used = "fake-model"
 
-    def __init__(self, *payloads, error=None):
+    def _init_(self, *payloads, error=None):
         self.payloads, self.error, self.calls = list(payloads), error, []
 
     def generate_json(self, prompt, image=None, **kw):
@@ -109,7 +106,7 @@ def test_party_links_by_category():
     with mock.patch.object(gu, "get_service", return_value=FakeService(raw)):
         r = gu.get_party_recommendations(PartyBudgetInput(total_budget=5000, party_type="Birthday", num_guests=10))
     cats = {c["category"]: c for c in r["budget_breakdown"]}
-    assert set(cats["Catering"]["items"][0]["shopping_links"]) == {"swiggy", "zomato"}
+    assert set(cats["Catering"]["items"][0]["shopping_links"]) == {"justdial", "sulekha", "wedmegood", "google"}
     assert "meesho" in cats["Decor"]["items"][0]["shopping_links"]
     assert "bookmyshow" in cats["Entertainment"]["items"][0]["shopping_links"]
     assert r["total_spent"] == 2000 + 300 + 1000  # quantity 0 treated as 1
@@ -206,6 +203,87 @@ def test_auth_and_session_flow():
     assert "sai" in auth.users_db and auth.users_db["sai"].hashed_password != "secret123"
 
 
+# ---------------------------------------------------------------- negative / insufficient budgets
+def test_negative_zero_and_invalid_budgets_rejected_with_clear_message():
+    cases = {-5: "negative", 0: "zero", float("nan"): "valid", float("inf"): "valid", 2e9: "too large"}
+    for model, extra in ((HomeBudgetInput, dict(num_lights=1)),
+                         (PartyBudgetInput, dict(party_type="Birthday", num_guests=5)),
+                         (JewelryBudgetInput, dict(occasion="Wedding"))):
+        for bad, word in cases.items():
+            try:
+                model(total_budget=bad, **extra)
+                raise AssertionError(f"{model._name_} accepted {bad}")
+            except ValueError as e:
+                assert word in str(e), (model._name_, bad, str(e))
+
+
+def test_insufficient_budget_blocked_before_calling_gemini():
+    fake = FakeService(HOME_RAW)
+    with mock.patch.object(gu, "get_service", return_value=fake):
+        for call in (
+            lambda: gu.get_home_recommendations(HomeBudgetInput(total_budget=500, num_lights=5, num_fans=4)),
+            lambda: gu.get_party_recommendations(PartyBudgetInput(total_budget=500, party_type="Wedding", num_guests=50)),
+            lambda: gu.get_jewelry_recommendations(JewelryBudgetInput(total_budget=100, occasion="Wedding")),
+        ):
+            try:
+                call()
+                raise AssertionError("expected InsufficientBudgetError")
+            except gu.InsufficientBudgetError as e:
+                assert e.minimum > e.budget and e.shortfall > 0 and "not enough" in e.message
+    assert fake.calls == []  # no API call wasted
+
+
+def test_party_at_home_has_no_venue_minimum_and_unticked_needs_are_skipped():
+    # 10 guests at home, catering only: min = 10 x 100 = 1000
+    fake = FakeService(HOME_RAW)
+    with mock.patch.object(gu, "get_service", return_value=fake):
+        gu.get_party_recommendations(PartyBudgetInput(
+            total_budget=1200, party_type="Birthday", num_guests=10, venue_type="Home",
+            needs_decoration=False, needs_entertainment=False))
+        try:
+            gu.get_party_recommendations(PartyBudgetInput(
+                total_budget=1200, party_type="Birthday", num_guests=10, venue_type="Banquet Hall",
+                needs_decoration=False, needs_entertainment=False))
+            raise AssertionError("banquet hall should add a venue minimum")
+        except gu.InsufficientBudgetError:
+            pass
+
+
+def test_tight_budget_is_flagged_but_still_planned():
+    raw = {"budget_breakdown": [{"category": "lighting", "items": [
+        {"name": "Bulb", "estimated_price": 100, "quantity": 5, "search_terms": "led bulb"}]}]}
+    with mock.patch.object(gu, "get_service", return_value=FakeService(raw)):
+        r = gu.get_home_recommendations(HomeBudgetInput(total_budget=600, num_lights=5))  # min 500
+    assert r["budget_status"] == "tight" and "tight" in r["additional_suggestions"][0].lower()
+
+
+def test_over_budget_after_retry_reports_shortfall():
+    expensive = {"budget_breakdown": [{"category": "lighting", "items": [
+        {"name": "Chandelier", "estimated_price": 9000, "quantity": 1, "search_terms": "chandelier"}]}]}
+    with mock.patch.object(gu, "get_service", return_value=FakeService(expensive)):
+        r = gu.get_home_recommendations(HomeBudgetInput(total_budget=5000, num_lights=5))
+    assert r["budget_status"] == "over" and r["shortfall"] == 4000 and "4,000" in r["budget_warning"]
+
+
+def test_budget_errors_over_http():
+    with TestClient(app) as c:
+        c.post("/register", json={"username": "budgeter", "email": "b@example.com", "password": "secret123"})
+        assert c.post("/token", data={"username": "budgeter", "password": "secret123"}).status_code == 200
+        # negative / zero -> 422 with readable per-field message
+        for bad in (-100, 0):
+            r = c.post("/party-budget", json={"total_budget": bad, "party_type": "Birthday", "num_guests": 5})
+            assert r.status_code == 422 and "greater than 0" in r.json()["detail"][0]["msg"], r.text
+        r = c.post("/jewelry-budget", data={"total_budget": "-20", "occasion": "Wedding"})
+        assert r.status_code == 422 and "negative" in r.json()["detail"][0]["msg"], r.text
+        # too low -> 422 with message + numbers, and nothing saved to history
+        before = len(c.get("/recommendation-history").json().get("history", []))
+        r = c.post("/party-budget", json={"total_budget": 300, "party_type": "Wedding", "num_guests": 100})
+        j = r.json()
+        assert r.status_code == 422 and j["error"] == "insufficient_budget", r.text
+        assert j["minimum_budget"] > 300 and j["shortfall"] == j["minimum_budget"] - 300 and "not enough" in j["detail"]
+        assert len(c.get("/recommendation-history").json().get("history", [])) == before
+
+
 def run_live():
     print("\n--- LIVE Gemini test ---")
     for name, fn in (
@@ -221,7 +299,7 @@ def run_live():
               f"remaining={r['remaining_budget']} {r.get('notice', '')}")
 
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
     for name, fn in tests:

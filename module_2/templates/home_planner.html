@@ -81,19 +81,60 @@
   <footer class="footer-simple">&copy; 2026 PocketSmart. All rights reserved.</footer>
 
 <script>
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const inr = n => '\u20B9' + Number(n || 0).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-const pretty = s => String(s || 'Other').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-const SHOP = {amazon:['Amazon','fa-brands fa-amazon'], flipkart:['Flipkart','fa-solid fa-cart-shopping'], ikea:['IKEA','fa-solid fa-store'],
-  myntra:['Myntra','fa-solid fa-cart-shopping'], ajio:['Ajio','fa-solid fa-cart-shopping']};
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;'
+}[c]));
+
+const inr = n =>
+  '\u20B9' + Number(n || 0).toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+
+const pretty = s =>
+  String(s || 'Other')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase());
+
+const SHOP = {
+  amazon: ['Amazon', 'fa-brands fa-amazon'],
+  flipkart: ['Flipkart', 'fa-solid fa-cart-shopping'],
+  ikea: ['IKEA', 'fa-solid fa-store'],
+  myntra: ['Myntra', 'fa-solid fa-cart-shopping'],
+  ajio: ['Ajio', 'fa-solid fa-cart-shopping']
+};
+
 function links(obj) {
-  return Object.entries(obj || {}).filter(([, u]) => /^https:\/\//.test(u)).map(([k, u]) => {
-    const [n, ic] = SHOP[k] || [pretty(k), 'fa-solid fa-cart-shopping'];
-    return `<a class="shop-btn" href="${esc(u)}" target="_blank" rel="noopener noreferrer"><i class="${ic}"></i> ${esc(n)}</a>`;
-  }).join('');
+  return Object.entries(obj || {})
+    .filter(([, u]) => /^https:\/\//.test(u))
+    .map(([k, u]) => {
+      const [n, ic] = SHOP[k] || [pretty(k), 'fa-solid fa-cart-shopping'];
+
+      return `<a class="shop-btn" href="${esc(u)}" target="_blank" rel="noopener noreferrer">
+        <i class="${ic}"></i> ${esc(n)}
+      </a>`;
+    })
+    .join('');
 }
+
+const budgetError = v =>
+  Number.isNaN(v)
+    ? 'Please enter your total budget.'
+    : v < 0
+      ? 'Budget cannot be negative. Please enter an amount greater than 0.'
+      : v === 0
+        ? 'Budget cannot be zero. Please enter an amount greater than 0.'
+        : !Number.isFinite(v)
+          ? 'Please enter a valid budget amount.'
+          : '';
+
 function errMsg(d, fallback) {
   if (d && typeof d.detail === 'string') return d.detail;
+
   if (d && Array.isArray(d.detail) && d.detail.length) {
     return d.detail.map(e => {
       const f = (e.loc || []).slice(-1)[0];
@@ -101,76 +142,208 @@ function errMsg(d, fallback) {
       return (f && f !== 'body' ? pretty(f) + ': ' : '') + m;
     }).join(' | ');
   }
+
   return fallback;
 }
-const CAT_ICON = {lighting:'fa-lightbulb', lights:'fa-lightbulb', ceiling_fans:'fa-fan', fans:'fa-fan', furniture:'fa-couch', dining_tables:'fa-utensils'};
+
+const CAT_ICON = {
+  lighting: 'fa-lightbulb',
+  lights: 'fa-lightbulb',
+  ceiling_fans: 'fa-fan',
+  fans: 'fa-fan',
+  furniture: 'fa-couch',
+  dining_tables: 'fa-utensils'
+};
 
 function render(d) {
   const rem = Number(d.remaining_budget || 0);
+
   let h = '<h2 class="result-title">Your Personalized Budget Plan</h2>';
-  if (d.notice) h += `<div class="alert alert-info"><i class="fa-solid fa-circle-info"></i> ${esc(d.notice)}</div>`;
-  if (d.budget_warning) h += `<div class="alert alert-warn"><i class="fa-solid fa-triangle-exclamation"></i> ${esc(d.budget_warning)}</div>`;
-  h += `<div class="res-card"><div class="res-head"><i class="fa-solid fa-chart-pie"></i> Budget Summary</div>
-    <div class="res-body"><div class="summary-row">
-      <span>Total Budget: <b>${inr(d.total_budget)}</b></span>
-      <span>Remaining Budget: <b class="${rem < 0 ? 'neg' : 'rem'}">${inr(rem)}</b></span>
-    </div></div></div>`;
-  (d.budget_breakdown || []).forEach(c => {
-    const key = String(c.category || '').toLowerCase().replace(/\s+/g, '_');
-    h += `<div class="res-card">
-      <div class="cat-head"><div class="cat-title"><i class="fa-solid ${CAT_ICON[key] || 'fa-list'}"></i> ${esc(pretty(c.category))}</div>
-        <div class="alloc">Allocation: ${inr(c.allocation)}</div></div>
-      <div class="table-wrap"><table class="items"><thead><tr><th>Item</th><th>Description</th><th>Price</th><th>Quantity</th><th>Shopping Links</th></tr></thead><tbody>`;
-    (c.items || []).forEach(i => {
-      h += `<tr><td><b>${esc(i.name)}</b></td><td>${esc(i.description)}</td><td>${inr(i.estimated_price)}</td><td>${esc(i.quantity)}</td>
-        <td><div class="shop-links">${links(i.shopping_links)}</div></td></tr>`;
-    });
-    h += '</tbody></table></div></div>';
-  });
-  const tips = d.additional_suggestions || [];
-  if (tips.length) {
-    h += `<div class="res-card"><div class="res-head"><i class="fa-solid fa-lightbulb"></i> Additional Suggestions</div>
-      <div class="res-body"><ul class="check-list">${tips.map(t => `<li><i class="fa-solid fa-circle-check"></i> ${esc(t)}</li>`).join('')}</ul></div></div>`;
+
+  if (d.notice) {
+    h += `<div class="alert alert-info">
+      <i class="fa-solid fa-circle-info"></i> ${esc(d.notice)}
+    </div>`;
   }
+
+  if (d.budget_warning) {
+    h += `<div class="alert alert-warn">
+      <i class="fa-solid fa-triangle-exclamation"></i> ${esc(d.budget_warning)}
+    </div>`;
+  }
+
+  h += `<div class="res-card">
+    <div class="res-head">
+      <i class="fa-solid fa-chart-pie"></i> Budget Summary
+    </div>
+    <div class="res-body">
+      <div class="summary-row">
+        <span>Total Budget: <b>${inr(d.total_budget)}</b></span>
+        <span>Remaining Budget:
+          <b class="${rem < 0 ? 'neg' : 'rem'}">${inr(rem)}</b>
+        </span>
+      </div>
+    </div>
+  </div>`;
+
+  (d.budget_breakdown || []).forEach(c => {
+    const key = String(c.category || '')
+      .toLowerCase()
+      .replace(/\s+/g, '_');
+
+    h += `<div class="res-card">
+      <div class="cat-head">
+        <div class="cat-title">
+          <i class="fa-solid ${CAT_ICON[key] || 'fa-list'}"></i>
+          ${esc(pretty(c.category))}
+        </div>
+        <div class="alloc">
+          Allocation: ${inr(c.allocation)}
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="items">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th>Description</th>
+              <th>Price</th>
+              <th>Quantity</th>
+              <th>Shopping Links</th>
+            </tr>
+          </thead>
+          <tbody>`;
+
+    (c.items || []).forEach(i => {
+      h += `<tr>
+        <td><b>${esc(i.name)}</b></td>
+        <td>${esc(i.description)}</td>
+        <td>${inr(i.estimated_price)}</td>
+        <td>${esc(i.quantity)}</td>
+        <td>
+          <div class="shop-links">
+            ${links(i.shopping_links)}
+          </div>
+        </td>
+      </tr>`;
+    });
+
+    h += `</tbody>
+        </table>
+      </div>
+    </div>`;
+  });
+
+  const tips = d.additional_suggestions || [];
+
+  if (tips.length) {
+    h += `<div class="res-card">
+      <div class="res-head">
+        <i class="fa-solid fa-lightbulb"></i> Additional Suggestions
+      </div>
+      <div class="res-body">
+        <ul class="check-list">
+          ${tips.map(t => `
+            <li>
+              <i class="fa-solid fa-circle-check"></i> ${esc(t)}
+            </li>
+          `).join('')}
+        </ul>
+      </div>
+    </div>`;
+  }
+
   const box = document.getElementById('results');
   box.innerHTML = h;
   box.hidden = false;
-  box.scrollIntoView({behavior: 'smooth', block: 'start'});
+  box.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start'
+  });
 }
 
 const errBox = document.getElementById('error');
+
 document.getElementById('homeForm').addEventListener('submit', async e => {
   e.preventDefault();
+
   errBox.hidden = true;
-  const num = id => parseInt(document.getElementById(id).value, 10) || 0;
+
+  const num = id =>
+    parseInt(document.getElementById(id).value, 10) || 0;
+
   const payload = {
-    total_budget: parseFloat(document.getElementById('total_budget').value),
-    num_lights: num('num_lights'), num_fans: num('num_fans'),
-    num_furniture: num('num_furniture'), num_dining_tables: num('num_dining_tables'),
-    has_living_room: document.getElementById('has_living_room').checked,
-    has_kitchen: document.getElementById('has_kitchen').checked,
-    has_bedroom: document.getElementById('has_bedroom').checked,
-    additional_requirements: document.getElementById('additional_requirements').value.trim() || null
+    total_budget: parseFloat(
+      document.getElementById('total_budget').value
+    ),
+    num_lights: num('num_lights'),
+    num_fans: num('num_fans'),
+    num_furniture: num('num_furniture'),
+    num_dining_tables: num('num_dining_tables'),
+    has_living_room:
+      document.getElementById('has_living_room').checked,
+    has_kitchen:
+      document.getElementById('has_kitchen').checked,
+    has_bedroom:
+      document.getElementById('has_bedroom').checked,
+    additional_requirements:
+      document.getElementById('additional_requirements').value.trim() || null
   };
-  if (!(payload.total_budget > 0)) { errBox.textContent = 'Please enter a total budget greater than 0.'; errBox.hidden = false; return; }
+
+  const bErr = budgetError(payload.total_budget);
+
+  if (bErr) {
+    errBox.textContent = bErr;
+    errBox.hidden = false;
+    return;
+  }
+
   const btn = document.getElementById('submitBtn');
+
   btn.disabled = true;
   document.getElementById('btnIcon').className = 'spinner';
-  document.getElementById('btnText').textContent = 'Generating... this can take a few seconds';
+  document.getElementById('btnText').textContent =
+    'Generating... this can take a few seconds';
+
   try {
-    const res = await fetch('/home-budget', {method: 'POST', credentials: 'same-origin',
-      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
-    if (res.status === 401) { location.href = '/login'; return; }
+    const res = await fetch('/home-budget', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (res.status === 401) {
+      location.href = '/login';
+      return;
+    }
+
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(errMsg(data, 'Could not generate recommendations. Please try again.'));
+
+    if (!res.ok) {
+      throw new Error(
+        errMsg(
+          data,
+          'Could not generate recommendations. Please try again.'
+        )
+      );
+    }
+
     render(data);
+
   } catch (err) {
     errBox.textContent = err.message;
     errBox.hidden = false;
+
   } finally {
     btn.disabled = false;
-    document.getElementById('btnIcon').className = 'fa-solid fa-calculator';
-    document.getElementById('btnText').textContent = 'Generate Recommendations';
+    document.getElementById('btnIcon').className =
+      'fa-solid fa-calculator';
+    document.getElementById('btnText').textContent =
+      'Generate Recommendations';
   }
 });
 </script>

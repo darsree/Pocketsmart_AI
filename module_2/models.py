@@ -3,14 +3,32 @@
 Everything the backend validates lives here: auth models, session model and the
 three planner input models (Home / Party / Jewelry).
 """
+import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+
+
+MAX_BUDGET = 1_000_000_000
 
 
 class _Base(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("total_budget", check_fields=False)
+    @classmethod
+    def _valid_budget(cls, v: float) -> float:
+        """Friendly messages for negative / zero / nonsense budgets (applies to all planners)."""
+        if not math.isfinite(v):
+            raise ValueError("Please enter a valid budget amount.")
+        if v < 0:
+            raise ValueError("Budget cannot be negative. Please enter an amount greater than 0.")
+        if v == 0:
+            raise ValueError("Budget cannot be zero. Please enter an amount greater than 0.")
+        if v > MAX_BUDGET:
+            raise ValueError(f"Budget is too large (maximum is Rs {MAX_BUDGET:,}).")
+        return v
 
 
 # --------------------------------------------------------------------------- auth
@@ -51,11 +69,10 @@ class UserSession(BaseModel):
 
 
 # ------------------------------------------------------------------ planner inputs
-_BUDGET = dict(gt=0, le=1_000_000_000)
 
 
 class HomeBudgetInput(_Base):
-    total_budget: float = Field(**_BUDGET)
+    total_budget: float
     num_lights: int = Field(default=0, ge=0, le=500)
     num_fans: int = Field(default=0, ge=0, le=500)
     num_furniture: int = Field(default=0, ge=0, le=500)
@@ -86,7 +103,7 @@ class HomeBudgetInput(_Base):
 
 
 class PartyBudgetInput(_Base):
-    total_budget: float = Field(**_BUDGET)
+    total_budget: float
     party_type: str = Field(min_length=2, max_length=50)
     num_guests: int = Field(ge=1, le=10_000)
     venue_type: Optional[str] = Field(default=None, max_length=60)
@@ -97,6 +114,6 @@ class PartyBudgetInput(_Base):
 
 
 class JewelryBudgetInput(_Base):
-    total_budget: float = Field(**_BUDGET)
+    total_budget: float
     occasion: str = Field(min_length=2, max_length=60)
     preferences: Optional[str] = Field(default=None, max_length=500)

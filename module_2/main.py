@@ -9,7 +9,7 @@ Module 3 (Member 3)
 Activity 3.1  POST /home-budget, /party-budget, /jewelry-budget (+ /generate-* aliases)
 Activity 3.2  GET /recommendation-history, GET /recommendation-details/{id}
 Activity 3.3  GET /history page (CORS + static routing are set up above)
-Activity 3.4  startup cleanup (lifespan) + __main__ entry point
+Activity 3.4  startup cleanup (lifespan) + _main_ entry point
 """
 import asyncio
 import html
@@ -40,7 +40,7 @@ import auth
 from auth import (ACCESS_TOKEN_EXPIRE_MINUTES, COOKIE_NAME, COOKIE_SECURE, active_sessions,
                   authenticate_user, create_access_token, end_session, get_current_active_user,
                   get_current_user, get_token, register_user, start_session, utcnow)
-from gemini_utils import (get_home_recommendations_async, get_jewelry_recommendations_async,
+from gemini_utils import (InsufficientBudgetError, get_home_recommendations_async, get_jewelry_recommendations_async,
                           get_party_recommendations_async, save_upload_file)
 from models import (HomeBudgetInput, JewelryBudgetInput, PartyBudgetInput, RegisterUser, Token,
                     UserInDB)
@@ -91,7 +91,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
-def render(request: Request, name: str, user: UserInDB | None = None, **ctx: Any):
+def render(request: Request, name: str, user: Optional[UserInDB] = None, **ctx: Any):
     """Render templates/<name>; show a small placeholder page if the UI file isn't there yet."""
     if (TEMPLATES_DIR / name).exists():
         return templates.TemplateResponse(request, name, {"user": user, **ctx})
@@ -112,6 +112,14 @@ async def _http_exc(request: Request, exc: StarletteHTTPException):
             and "text/html" in request.headers.get("accept", "")):
         return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
     return await http_exception_handler(request, exc)
+
+
+# Budget too low for the request -> 422 with a readable message plus numbers the UI can use.
+@app.exception_handler(InsufficientBudgetError)
+async def _insufficient_budget(request: Request, exc: InsufficientBudgetError):
+    return JSONResponse(status_code=422, content={
+        "detail": exc.message, "error": "insufficient_budget",
+        "budget": exc.budget, "minimum_budget": exc.minimum, "shortfall": exc.shortfall})
 
 
 # =============================================================== public pages
