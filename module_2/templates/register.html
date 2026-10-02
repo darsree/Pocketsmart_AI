@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Create Account - PocketSmart</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="auth">
+  <div class="auth-wrap">
+    <div class="auth-brand">
+      <h1>PocketSmart</h1>
+      <p>AI-Powered Budget Planning</p>
+    </div>
+    <div class="auth-card">
+      <h2>Create Your Account</h2>
+      <div id="msg" class="alert" hidden></div>
+      <form id="regForm" novalidate>
+        <div class="form-group">
+          <label for="username">Username</label>
+          <div class="input-icon"><i class="fa-solid fa-user"></i>
+            <input type="text" id="username" placeholder="Choose a username" autocomplete="username" maxlength="30" required></div>
+          <div class="hint">3-30 characters: letters, numbers, . _ -</div>
+        </div>
+        <div class="form-group">
+          <label for="email">Email</label>
+          <div class="input-icon"><i class="fa-solid fa-envelope"></i>
+            <input type="email" id="email" placeholder="Enter your email" autocomplete="email" required></div>
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <div class="input-icon"><i class="fa-solid fa-lock"></i>
+            <input type="password" id="password" placeholder="Create a strong password" autocomplete="new-password" maxlength="72" required></div>
+          <div class="strength"><span id="strengthBar"></span></div>
+        </div>
+        <div class="form-group">
+          <label for="confirm">Confirm Password</label>
+          <div class="input-icon"><i class="fa-solid fa-circle-check"></i>
+            <input type="password" id="confirm" placeholder="Confirm your password" autocomplete="new-password" maxlength="72" required></div>
+        </div>
+        <button type="submit" class="btn btn-block" id="submitBtn"><span id="btnText">Create Account</span> <i class="fa-solid fa-user-plus"></i></button>
+      </form>
+      <p class="auth-foot">Already have an account? <a href="/login">Sign In</a></p>
+    </div>
+  </div>
+
+<script>
+const msg = document.getElementById('msg');
+const pw = document.getElementById('password');
+function show(type, text) {
+  msg.className = 'alert alert-' + type;
+  msg.textContent = text;
+  msg.hidden = false;
+}
+pw.addEventListener('input', () => {
+  const v = pw.value;
+  let score = 0;
+  if (v.length >= 6) score++;
+  if (v.length >= 10) score++;
+  if (/[A-Z]/.test(v) && /[a-z]/.test(v)) score++;
+  if (/\d/.test(v)) score++;
+  if (/[^A-Za-z0-9]/.test(v)) score++;
+  const bar = document.getElementById('strengthBar');
+  bar.style.width = (v ? Math.max(score, 1) * 20 : 0) + '%';
+  bar.style.background = score <= 2 ? '#e0524d' : score <= 3 ? '#f5a623' : '#2e9e4f';
+});
+function errMsg(d) {
+  if (d && Array.isArray(d.detail) && d.detail.length) {
+    return d.detail.map(e => {
+      const f = (e.loc || []).slice(-1)[0];
+      const m = String(e.msg || '').replace(/^Value error, /, '');
+      return (f && f !== 'body' ? f.replace(/_/g, ' ') + ': ' : '') + m;
+    }).join(' | ');
+  }
+  if (d && typeof d.detail === 'string') return d.detail;
+  return (d && d.message) || 'Registration failed. Please try again.';
+}
+document.getElementById('regForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const payload = {
+    username: document.getElementById('username').value.trim(),
+    email: document.getElementById('email').value.trim(),
+    password: pw.value,
+    confirm_password: document.getElementById('confirm').value
+  };
+  if (!payload.username || !payload.email || !payload.password) { show('error', 'Please fill in all fields.'); return; }
+  if (payload.password !== payload.confirm_password) { show('error', 'Passwords do not match.'); return; }
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  document.getElementById('btnText').textContent = 'Creating account...';
+  try {
+    const res = await fetch('/register', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(errMsg(data));
+    show('success', 'Account created! Redirecting to sign in...');
+    setTimeout(() => location.href = '/login?registered=1', 900);
+  } catch (err) {
+    show('error', err.message);
+    btn.disabled = false;
+    document.getElementById('btnText').textContent = 'Create Account';
+  }
+});
+</script>
+</body>
+</html>

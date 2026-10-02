@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }} - PocketSmart</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <nav class="navbar">
+    <div class="container">
+      <a href="/" class="brand">PocketSmart</a>
+      <div class="nav-links">
+        {% if user %}
+        <a href="/dashboard">Dashboard</a>
+        <a href="/logout" class="btn btn-sm">Logout</a>
+        {% else %}
+        <a href="/login">Sign In</a>
+        <a href="/register" class="btn btn-sm">Get Started</a>
+        {% endif %}
+      </div>
+    </div>
+  </nav>
+  <main>
+    <section class="page-hero"><h1><i class="fa-solid {{ icon }}"></i> {{ title }}</h1></section>
+    <div class="planner-main">
+      <div class="planner-card info-card">
+        {% for p in paragraphs %}<p>{{ p }}</p>{% endfor %}
+      </div>
+    </div>
+  </main>
+{% include "_footer.html" %}
+</body>
+</html>
