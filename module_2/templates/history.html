@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Recommendation History - PocketSmart</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <nav class="navbar">
+    <div class="container">
+      <a href="/dashboard" class="brand"><i class="fa-solid fa-wallet"></i> PocketSmart</a>
+      <div class="nav-links">
+        <a href="/dashboard"><i class="fa-solid fa-chart-line"></i> Dashboard</a>
+        <a href="/home-planner"><i class="fa-solid fa-house"></i> Home Budget</a>
+        <a href="/party-planner"><i class="fa-solid fa-champagne-glasses"></i> Party Budget</a>
+        <a href="/jewelry-planner"><i class="fa-solid fa-gem"></i> Jewelry Budget</a>
+        <a href="/history" class="active"><i class="fa-solid fa-clock-rotate-left"></i> History</a>
+        <a href="/logout"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
+      </div>
+    </div>
+  </nav>
+
+  <main>
+    <div class="hist-wrap">
+      <div class="hist-hero">
+        <h1>Recommendation History</h1>
+        <p>Review and reuse your past budget plans</p>
+      </div>
+      <div class="hist-bar">
+        <h2 class="hist-title"><i class="fa-solid fa-clock-rotate-left"></i> Your Past Plans</h2>
+        <div class="filter-pills" id="filters" role="tablist">
+          <button type="button" class="fpill active" data-f="all">All <span class="cnt" id="c-all">0</span></button>
+          <button type="button" class="fpill" data-f="home"><i class="fa-solid fa-house"></i> Home <span class="cnt" id="c-home">0</span></button>
+          <button type="button" class="fpill" data-f="party"><i class="fa-solid fa-champagne-glasses"></i> Party <span class="cnt" id="c-party">0</span></button>
+          <button type="button" class="fpill" data-f="jewelry"><i class="fa-solid fa-gem"></i> Jewelry <span class="cnt" id="c-jewelry">0</span></button>
+        </div>
+      </div>
+      <div id="histGrid" class="hist-grid"><div class="empty">Loading...</div></div>
+    </div>
+  </main>
+
+  <div class="modal" id="modal">
+    <div class="modal-box">
+      <div class="modal-head"><span id="modalTitle">Plan details</span><button type="button" id="modalClose" aria-label="Close">&times;</button></div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <footer class="footer-simple">&copy; 2026 PocketSmart. All rights reserved.</footer>
+
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const inr = n => '\u20B9' + Number(n || 0).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const pretty = s => String(s || 'Other').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+const fmtDate = iso => {
+  const d = new Date(String(iso || ''));
+  return isNaN(d) ? '' : d.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'});
+};
+const ICON = {home: 'fa-house', party: 'fa-champagne-glasses', jewelry: 'fa-gem'};
+
+// history "input" is a summary string such as "total budget: 5000.0, party type: wedding"
+const KEYS = ['total budget','num lights','num fans','num furniture','num dining tables','has living room','has kitchen','has bedroom','party type','num guests','venue type','needs catering','needs decoration','needs entertainment','occasion','preferences','additional requirements','image'];
+function parseInput(s) {
+  const out = {};
+  const re = new RegExp('(?:^|, )(' + KEYS.join('|') + '): ', 'g');
+  const marks = []; let m;
+  while ((m = re.exec(s || ''))) marks.push({k: m[1], end: re.lastIndex, start: m.index});
+  marks.forEach((mk, i) => { out[mk.k] = s.slice(mk.end, i + 1 < marks.length ? marks[i + 1].start : s.length); });
+  return out;
+}
+const singular = (n, word) => Number(n) === 1 ? word.replace(/s$/, '') : word;
+function describe(item) {
+  const p = parseInput(item.input);
+  const tags = [];
+  const m = /Rs\s*([\d,]+)\s*planned of Rs\s*([\d,]+)/.exec(item.summary || '');
+  const planned = m ? Number(m[1].replace(/,/g, '')) : null;
+  let title;
+  if (item.type === 'home') {
+    title = 'Home Budget Plan';
+    ['has living room', 'has kitchen', 'has bedroom'].forEach(k => { if (p[k]) tags.push(pretty(k.replace('has ', ''))); });
+    [['num lights', 'lights'], ['num fans', 'fans'], ['num furniture', 'furniture'], ['num dining tables', 'dining tables']]
+      .forEach(([k, w]) => { if (Number(p[k]) > 0) tags.push(p[k] + ' ' + singular(p[k], w)); });
+  } else if (item.type === 'party') {
+    title = pretty(p['party type'] || '').trim() + ' Party Plan';
+    if (p['num guests']) tags.push(p['num guests'] + ' guests');
+    if (p['venue type']) tags.push(p['venue type']);
+  } else {
+    title = 'Jewelry Budget Plan';
+    if (p['occasion']) tags.push(pretty(p['occasion']));
+    if (p['image']) tags.push('Outfit image');
+  }
+  return {title, tags, p, planned};
+}
+
+let ALL = [];
+let FILTER = 'all';
+function renderList() {
+  const f = FILTER;
+  ['all', 'home', 'party', 'jewelry'].forEach(k => {
+    document.getElementById('c-' + k).textContent = k === 'all' ? ALL.length : ALL.filter(i => i.type === k).length;
+  });
+  const grid = document.getElementById('histGrid');
+  const items = ALL.filter(i => f === 'all' || i.type === f);
+  if (!items.length) {
+    grid.innerHTML = '<div class="empty" style="grid-column:1/-1">' + (ALL.length
+      ? 'No plans of this type yet.'
+      : 'No history yet. Create a plan with any planner and it will show up here.') + '</div>';
+    return;
+  }
+  grid.innerHTML = items.map(it => {
+    const d = describe(it);
+    const budget = Number(d.p['total budget'] || 0);
+    const pct = (d.planned != null && budget > 0) ? Math.min(100, Math.round(d.planned / budget * 100)) : 0;
+    const shown = d.tags.slice(0, 3), extra = d.tags.length - shown.length;
+    return `<article class="hcard ${esc(it.type)}">
+      <div class="hcard-head">
+        <span class="badge"><i class="fa-solid ${ICON[it.type] || 'fa-wallet'}"></i></span>
+        <div class="ht"><div class="t">${esc(d.title)}</div><div class="d">${esc(fmtDate(it.timestamp))}</div></div>
+      </div>
+      <div class="hcard-body">
+        <div class="stats">
+          <div><small>Budget</small><b>${inr(budget)}</b></div>
+          <div><small>Planned</small><b>${d.planned != null ? inr(d.planned) : '-'}</b></div>
+        </div>
+        <div class="bar" title="${pct}% of budget planned"><span style="width:${pct}%"></span></div>
+        <div class="tags">${shown.map(t => `<span class="tag" title="${esc(t)}">${esc(t)}</span>`).join('')}${extra > 0 ? `<span class="tag more">+${extra} more</span>` : ''}</div>
+        <button type="button" class="btn btn-blue" data-id="${esc(it.id)}"><i class="fa-solid fa-eye"></i> View Details</button>
+      </div></article>`;
+  }).join('');
+}
+
+// ---- detail renderers (same result shapes the planner pages receive) ----
+function linkPills(obj) {
+  return Object.entries(obj || {}).filter(([, u]) => /^https:\/\//.test(u)).map(([k, u]) =>
+    `<a class="pill" href="${esc(u)}" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-bag-shopping"></i> ${esc(pretty(k))}</a>`).join('');
+}
+function summaryBlock(d) {
+  const rem = Number(d.remaining_budget || 0);
+  return `<div class="summary-row" style="margin-bottom:14px"><span>Total Budget: <b>${inr(d.total_budget)}</b></span>
+    <span>Planned: <b>${inr(d.total_spent)}</b></span>
+    <span>Remaining: <b class="${rem < 0 ? 'neg' : 'rem'}">${inr(rem)}</b></span></div>`;
+}
+function breakdownBlock(d) {
+  return (d.budget_breakdown || []).map(c => `<div class="cat-box">
+    <div class="cat-box-head"><span>${esc(pretty(c.category))}</span><span>${inr(c.allocation)}</span></div>
+    ${(c.items || []).map(i => `<div class="item-box"><div class="item-top"><span>${esc(i.name)}${Number(i.quantity) > 1 ? ' (x' + esc(i.quantity) + ')' : ''}</span><span>${inr(Number(i.estimated_price || 0) * Number(i.quantity || 1))}</span></div>
+      <div class="item-desc">${esc(i.description)}</div><div class="pills">${linkPills(i.shopping_links)}</div></div>`).join('')}
+  </div>`).join('');
+}
+function listBlock(title, arr) {
+  return (arr && arr.length) ? `<div class="sub-title">${esc(title)}</div><div class="sugg-box"><ul class="dot-list">${arr.map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>` : '';
+}
+function detailHtml(type, d) {
+  let h = summaryBlock(d);
+  if (d.notice) h += `<div class="alert alert-info">${esc(d.notice)}</div>`;
+  if (d.budget_warning) h += `<div class="alert alert-warn">${esc(d.budget_warning)}</div>`;
+  if (type === 'jewelry') {
+    const oa = d.outfit_analysis;
+    if (oa) h += `<div class="outfit" style="margin-bottom:12px"><span><b>Colors:</b> ${esc((oa.colors || []).join(', ') || '-')}</span><span><b>Style:</b> ${esc(oa.style || '-')}</span><span><b>Formality:</b> ${esc(oa.formality || '-')}</span></div>`;
+    h += (d.jewelry_recommendations || []).map(i => `<div class="jw-item"><div class="jw-top"><h4>${esc(i.item_type || i.name)}</h4><span class="price-badge">${inr(i.estimated_price)}</span></div>
+      <p>${esc(i.description)}</p><div class="pills">${linkPills(i.shopping_links)}</div></div>`).join('');
+    h += listBlock('Styling Tips', d.styling_tips);
+    return h;
+  }
+  h += breakdownBlock(d);
+  if (type === 'party') {
+    h += (d.venue_suggestions || []).length ? '<div class="sub-title">Venue Suggestions</div>' : '';
+    (d.venue_suggestions || []).forEach(v => {
+      h += `<div class="venue-card"><h4><span>${esc(v.name)}</span><span>${inr(v.estimated_cost)}</span></h4>
+        ${v.type ? `<p>Type: ${esc(v.type)}</p>` : ''}${v.capacity ? `<p>Capacity: ${esc(v.capacity)} guests</p>` : ''}
+        ${v.location ? `<p>Location: ${esc(v.location)}</p>` : ''}<div class="pills">${linkPills(v.search_links)}</div></div>`;
+    });
+  }
+  h += listBlock('Additional Suggestions', d.additional_suggestions);
+  return h;
+}
+
+const modal = document.getElementById('modal');
+const closeModal = () => modal.classList.remove('open');
+document.getElementById('modalClose').addEventListener('click', closeModal);
+modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+document.getElementById('histGrid').addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-id]');
+  if (!btn) return;
+  document.getElementById('modalTitle').textContent = 'Loading...';
+  document.getElementById('modalBody').innerHTML = '<div class="empty">Loading...</div>';
+  modal.classList.add('open');
+  try {
+    const res = await fetch('/recommendation-details/' + encodeURIComponent(btn.dataset.id), {credentials: 'same-origin'});
+    if (res.status === 401) { location.href = '/login'; return; }
+    const data = await res.json();
+    if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Could not load details.');
+    document.getElementById('modalTitle').textContent = pretty(data.type) + ' Plan';
+    document.getElementById('modalBody').innerHTML =
+      `<div class="meta">${esc(fmtDate(data.timestamp))} &middot; ${esc(data.input)}</div>` + detailHtml(data.type, data.full_result || {});
+  } catch (err) {
+    document.getElementById('modalTitle').textContent = 'Error';
+    document.getElementById('modalBody').innerHTML = `<div class="alert alert-error">${esc(err.message)}</div>`;
+  }
+});
+document.getElementById('filters').addEventListener('click', e => {
+  const b = e.target.closest('.fpill');
+  if (!b) return;
+  FILTER = b.dataset.f;
+  document.querySelectorAll('.fpill').forEach(x => x.classList.toggle('active', x === b));
+  renderList();
+});
+
+(async () => {
+  try {
+    const res = await fetch('/recommendation-history', {credentials: 'same-origin'});
+    if (res.status === 401) { location.href = '/login'; return; }
+    ALL = (await res.json()).history || [];
+  } catch (e) {
+    document.getElementById('histGrid').innerHTML = '<div class="empty" style="grid-column:1/-1">Could not load history.</div>';
+    return;
+  }
+  renderList();
+})();
+</script>
+</body>
+</html>

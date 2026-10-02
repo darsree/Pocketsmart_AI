@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign In - PocketSmart</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="auth">
+  <div class="auth-wrap">
+    <div class="auth-brand">
+      <h1>PocketSmart</h1>
+      <p>AI-Powered Budget Planning</p>
+    </div>
+    <div class="auth-card">
+      <h2>Welcome Back</h2>
+      <div id="msg" class="alert" hidden></div>
+      <form id="loginForm" novalidate>
+        <div class="form-group">
+          <label for="username">Username</label>
+          <div class="input-icon"><i class="fa-solid fa-user"></i>
+            <input type="text" id="username" name="username" placeholder="Enter your username" autocomplete="username" required></div>
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <div class="input-icon"><i class="fa-solid fa-lock"></i>
+            <input type="password" id="password" name="password" placeholder="Enter your password" autocomplete="current-password" required></div>
+        </div>
+        <a href="/forgot-password" class="forgot">Forgot Password?</a>
+        <button type="submit" class="btn btn-block" id="submitBtn"><span id="btnText">Sign In</span> <i class="fa-solid fa-arrow-right" id="btnIcon"></i></button>
+      </form>
+      <p class="auth-foot">Don't have an account? <a href="/register">Create Account</a></p>
+    </div>
+  </div>
+
+<script>
+const msg = document.getElementById('msg');
+function show(type, text) {
+  msg.className = 'alert alert-' + type;
+  msg.textContent = text;
+  msg.hidden = false;
+}
+if (new URLSearchParams(location.search).get('reset')) {
+  show('success', 'Password updated! Please sign in.');
+} else if (new URLSearchParams(location.search).get('registered')) {
+  show('success', 'Account created! Please sign in.');
+}
+document.getElementById('loginForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  if (!username || !password) { show('error', 'Please enter your username and password.'); return; }
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  document.getElementById('btnText').textContent = 'Signing in...';
+  try {
+    const res = await fetch('/token', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({username, password})
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Login failed. Please try again.');
+    location.href = '/dashboard';
+  } catch (err) {
+    show('error', err.message);
+    btn.disabled = false;
+    document.getElementById('btnText').textContent = 'Sign In';
+  }
+});
+</script>
+</body>
+</html>

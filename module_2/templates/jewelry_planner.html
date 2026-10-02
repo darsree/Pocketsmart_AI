@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jewelry Budget Planner - PocketSmart</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <nav class="navbar">
+    <div class="container">
+      <a href="/dashboard" class="brand"><i class="fa-solid fa-wallet"></i> PocketSmart</a>
+      <div class="nav-links">
+        <a href="/dashboard"><i class="fa-solid fa-chart-line"></i> Dashboard</a>
+        <a href="/home-planner"><i class="fa-solid fa-house"></i> Home Budget</a>
+        <a href="/party-planner"><i class="fa-solid fa-champagne-glasses"></i> Party Budget</a>
+        <a href="/jewelry-planner" class="active"><i class="fa-solid fa-gem"></i> Jewelry Budget</a>
+        <a href="/history"><i class="fa-solid fa-clock-rotate-left"></i> History</a>
+        <a href="/logout"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
+      </div>
+    </div>
+  </nav>
+
+  <main>
+    <section class="page-hero">
+      <h1>Jewelry Budget Planner</h1>
+      <p>Get AI-powered jewelry recommendations within your budget for any occasion</p>
+    </section>
+
+    <div class="planner-main">
+      <div class="planner-card">
+        <div id="error" class="alert alert-error" hidden></div>
+        <form id="jewelryForm" novalidate>
+          <div class="form-section">
+            <div class="section-head"><span class="ico"><i class="fa-solid fa-indian-rupee-sign"></i></span> Budget Details</div>
+            <div class="field"><label for="total_budget">Total Budget (&#8377;)</label>
+              <div class="input-icon"><i class="fa-solid fa-money-bill-wave"></i><input type="number" id="total_budget" min="1" step="any" placeholder="e.g. 20000" required></div></div>
+          </div>
+
+          <div class="form-section">
+            <div class="section-head"><span class="ico"><i class="fa-solid fa-gift"></i></span> Occasion &amp; Preferences</div>
+            <div class="field" style="max-width:300px;margin-bottom:14px"><label for="occasion"><i class="fa-solid fa-champagne-glasses"></i> Occasion</label>
+              <input type="text" id="occasion" list="occasions" maxlength="60" placeholder="e.g. Wedding, Birthday" required>
+              <datalist id="occasions"><option value="Wedding"><option value="Birthday"><option value="Anniversary"><option value="Festival"><option value="Party"><option value="Office / Daily wear"></datalist></div>
+            <div class="field"><label for="preferences"><i class="fa-solid fa-heart"></i> Style Preferences</label>
+              <textarea id="preferences" rows="3" maxlength="500" placeholder="Describe your style preferences, materials, colors, etc."></textarea></div>
+          </div>
+
+          <div class="form-section">
+            <div class="section-head"><span class="ico"><i class="fa-solid fa-shirt"></i></span> Upload Outfit Image <small style="font-weight:400;color:#5b6b82">(optional)</small></div>
+            <label class="upload-area" id="dropArea" for="image">
+              <i class="fa-solid fa-cloud-arrow-up"></i>
+              <span>Click to choose a photo of your outfit (JPG, PNG or WEBP, max 5 MB)</span>
+            </label>
+            <input type="file" id="image" accept="image/jpeg,image/png,image/webp" hidden>
+            <div class="upload-preview" id="preview" hidden>
+              <img id="previewImg" alt="Outfit preview">
+              <button type="button" class="btn btn-gray" id="removeImg"><i class="fa-solid fa-trash"></i> Remove Image</button>
+            </div>
+          </div>
+
+          <div class="submit-row">
+            <button type="submit" class="btn" id="submitBtn"><i class="fa-solid fa-pencil" id="btnIcon"></i> <span id="btnText">Get Recommendations</span></button>
+          </div>
+        </form>
+      </div>
+
+      <section class="results" id="results" hidden></section>
+    </div>
+  </main>
+
+  <footer class="footer-simple">&copy; 2026 PocketSmart | Smart Budget Solutions</footer>
+
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const inr = n => '\u20B9' + Number(n || 0).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const pretty = s => String(s || 'Other').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+const SHOP = {amazon:'Amazon', flipkart:'Flipkart', bluestone:'BlueStone', tanishq:'Tanishq', caratlane:'CaratLane', melorra:'Melorra', meesho:'Meesho'};
+function links(obj) {
+  return Object.entries(obj || {}).filter(([, u]) => /^https:\/\//.test(u)).map(([k, u]) =>
+    `<a class="pill" href="${esc(u)}" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-bag-shopping"></i> ${esc(SHOP[k] || pretty(k))}</a>`).join('');
+}
+function errMsg(d, fallback) {
+  if (d && typeof d.detail === 'string') return d.detail;
+  if (d && Array.isArray(d.detail) && d.detail.length) {
+    return d.detail.map(e => {
+      const f = (e.loc || []).slice(-1)[0];
+      const m = String(e.msg || '').replace(/^Value error, /, '');
+      return (f && f !== 'body' ? pretty(f) + ': ' : '') + m;
+    }).join(' | ');
+  }
+  return fallback;
+}
+
+// ---- image upload + preview ----
+const fileInput = document.getElementById('image');
+const errBox = document.getElementById('error');
+function fail(text) { errBox.textContent = text; errBox.hidden = false; }
+function clearImage() {
+  fileInput.value = '';
+  document.getElementById('preview').hidden = true;
+  document.getElementById('dropArea').hidden = false;
+  document.getElementById('previewImg').removeAttribute('src');
+}
+fileInput.addEventListener('change', () => {
+  errBox.hidden = true;
+  const f = fileInput.files[0];
+  if (!f) return;
+  if (!/^image\/(jpeg|png|webp)$/.test(f.type)) { clearImage(); return fail('Only JPG, PNG or WEBP images are allowed.'); }
+  if (f.size > 5 * 1024 * 1024) { clearImage(); return fail('Image is too large (max 5 MB).'); }
+  const reader = new FileReader();
+  reader.onload = ev => {
+    document.getElementById('previewImg').src = ev.target.result;
+    document.getElementById('preview').hidden = false;
+    document.getElementById('dropArea').hidden = true;
+  };
+  reader.readAsDataURL(f);
+});
+document.getElementById('removeImg').addEventListener('click', clearImage);
+
+// ---- results ----
+function render(d) {
+  const rem = Number(d.remaining_budget || 0);
+  let h = '<h2 class="result-title">Your Personalized Jewelry Recommendations</h2>';
+  if (d.notice) h += `<div class="alert alert-info"><i class="fa-solid fa-circle-info"></i> ${esc(d.notice)}</div>`;
+  h += `<div class="res-card"><div class="res-head"><i class="fa-solid fa-chart-pie"></i> Budget Summary</div>
+    <div class="res-body"><div class="summary-row">
+      <span>Total Budget: <b>${inr(d.total_budget)}</b></span>
+      <span>Remaining Budget: <b class="${rem < 0 ? 'neg' : 'rem'}">${inr(rem)}</b></span></div></div></div>`;
+  const oa = d.outfit_analysis;
+  if (oa) {
+    h += `<div class="res-card"><div class="res-body"><div class="cat-title" style="margin-bottom:10px"><i class="fa-solid fa-shirt"></i> Outfit Analysis</div>
+      <div class="outfit"><span><i class="fa-solid fa-palette"></i> <b>Colors:</b> ${esc((oa.colors || []).join(', ') || '-')}</span>
+      <span><i class="fa-solid fa-tag"></i> <b>Style:</b> ${esc(oa.style || '-')}</span>
+      <span><i class="fa-solid fa-user-tie"></i> <b>Formality:</b> ${esc(oa.formality || '-')}</span></div></div></div>`;
+  }
+  const items = d.jewelry_recommendations || [];
+  h += '<div class="res-card"><div class="res-head"><i class="fa-solid fa-gem"></i> Jewelry Recommendations</div><div class="res-body">';
+  items.forEach(i => {
+    h += `<div class="jw-item"><div class="jw-top"><h4><i class="fa-solid fa-circle"></i> ${esc(i.item_type || i.name)}</h4><span class="price-badge">${inr(i.estimated_price)}</span></div>
+      <p><b>Description:</b> ${esc(i.description)}</p>
+      ${i.style ? `<p><b>Style:</b> ${esc(i.style)}</p>` : ''}
+      <p style="margin-top:10px"><b><i class="fa-solid fa-cart-shopping"></i> Shop For This:</b></p>
+      <div class="pills">${links(i.shopping_links)}</div></div>`;
+  });
+  h += '</div></div>';
+  const tips = d.styling_tips || [];
+  if (tips.length) {
+    h += `<div class="res-card"><div class="res-head"><i class="fa-solid fa-lightbulb"></i> Styling Tips</div>
+      <div class="res-body"><div class="tips"><ul class="check-list">${tips.map(t => `<li><i class="fa-solid fa-circle-check"></i> ${esc(t)}</li>`).join('')}</ul></div></div></div>`;
+  }
+  const box = document.getElementById('results');
+  box.innerHTML = h;
+  box.hidden = false;
+  box.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+document.getElementById('jewelryForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  errBox.hidden = true;
+  const budget = parseFloat(document.getElementById('total_budget').value);
+  const occasion = document.getElementById('occasion').value.trim();
+  if (!(budget > 0)) return fail('Please enter a total budget greater than 0.');
+  if (occasion.length < 2) return fail('Please enter the occasion (for example Wedding).');
+  const fd = new FormData();   // multipart: the browser sets the Content-Type header itself
+  fd.append('total_budget', budget);
+  fd.append('occasion', occasion);
+  const prefs = document.getElementById('preferences').value.trim();
+  if (prefs) fd.append('preferences', prefs);
+  if (fileInput.files[0]) fd.append('image', fileInput.files[0]);
+
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  document.getElementById('btnIcon').className = 'spinner';
+  document.getElementById('btnText').textContent = 'Generating... this can take a few seconds';
+  try {
+    const res = await fetch('/jewelry-budget', {method: 'POST', credentials: 'same-origin', body: fd});
+    if (res.status === 401) { location.href = '/login'; return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(errMsg(data, 'Could not get recommendations. Please try again.'));
+    render(data);
+  } catch (err) {
+    fail(err.message);
+  } finally {
+    btn.disabled = false;
+    document.getElementById('btnIcon').className = 'fa-solid fa-pencil';
+    document.getElementById('btnText').textContent = 'Get Recommendations';
+  }
+});
+</script>
+</body>
+</html>

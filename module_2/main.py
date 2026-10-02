@@ -13,8 +13,10 @@ Activity 3.4  startup cleanup (lifespan) + __main__ entry point
 """
 import asyncio
 import html
+import json
 import logging
 import os
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -42,6 +44,8 @@ from gemini_utils import (get_home_recommendations_async, get_jewelry_recommenda
                           get_party_recommendations_async, save_upload_file)
 from models import (HomeBudgetInput, JewelryBudgetInput, PartyBudgetInput, RegisterUser, Token,
                     UserInDB)
+
+import extras  # Member 4: forgot-password + footer info pages
 
 load_dotenv()
 log = logging.getLogger("pocketsmart.main")
@@ -82,6 +86,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(extras.router)  # Member 4: forgot-password + footer pages
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
@@ -263,6 +268,35 @@ MAX_HISTORY_PER_USER = 100
 # username -> newest-last list of saved recommendations (in memory, like active_sessions)
 user_recommendations: Dict[str, List[Dict[str, Any]]] = {}
 
+# History is mirrored to data/history.json so it survives a server restart (like data/users.json).
+HISTORY_FILE = Path(os.getenv("HISTORY_DB_FILE", str(BASE_DIR / "data" / "history.json")))
+_history_lock = threading.Lock()
+
+
+def _load_history() -> None:
+    if not HISTORY_FILE.exists():
+        return
+    try:
+        raw = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        for username, records in raw.items():
+            user_recommendations[username] = list(records)[-MAX_HISTORY_PER_USER:]
+        log.info("Loaded history for %d user(s) from %s", len(user_recommendations), HISTORY_FILE)
+    except Exception as exc:  # a corrupted file must not stop the app
+        log.error("Could not read %s: %s", HISTORY_FILE, exc)
+
+
+def _save_history() -> None:
+    try:
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = HISTORY_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(user_recommendations, default=str), encoding="utf-8")
+        tmp.replace(HISTORY_FILE)
+    except Exception:
+        log.exception("Could not save history")
+
+
+_load_history()
+
 
 def _set_last(username: str, key: str, value: Dict[str, Any]) -> None:
     """Remember the latest planning request in the user's session data."""
@@ -296,9 +330,11 @@ def save_to_history(username: str, recommendation_type: str, input_data: Dict[st
         "result_summary": _summarise_result(recommendation_type, result),
         "full_result": result,
     }
-    records = user_recommendations.setdefault(username, [])
-    records.append(record)
-    del records[:-MAX_HISTORY_PER_USER]  # keep memory bounded
+    with _history_lock:
+        records = user_recommendations.setdefault(username, [])
+        records.append(record)
+        del records[:-MAX_HISTORY_PER_USER]  # keep memory bounded
+        _save_history()
     return record["id"]
 
 
