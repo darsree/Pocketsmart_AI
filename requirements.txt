@@ -1,3 +1,14 @@
+# --- Member 1 (Gemini) ---
 google-genai>=1.0.0
 python-dotenv>=1.0.1
 Pillow>=10.3.0
+# --- Member 2 (FastAPI backend, auth, recommendations) ---
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+jinja2>=3.1
+pydantic>=2.6
+email-validator>=2.1
+python-jose[cryptography]>=3.3
+bcrypt>=4.1
+httpx>=0.27

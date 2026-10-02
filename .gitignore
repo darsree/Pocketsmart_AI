@@ -1,5 +1,22 @@
+# Secrets - never commit
 .env
+.env.*
+!.env.example
+
+# Python
 venv/
+.venv/
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# App data created at runtime
+data/
 static/uploads/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
